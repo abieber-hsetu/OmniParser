@@ -4,19 +4,34 @@ services:
     container_name: omni-windows
     privileged: true
     environment:
+      VERSION: "11"
       RAM_SIZE: "8G"
       CPU_CORES: "4"
       DISK_SIZE: "20G"
+      KVM: "Y"
+      CPU_MODEL: "host"
+      NET_TYPE: "none"
+      PASST: "N"
+      ARGUMENTS: "-netdev user,id=net0,hostfwd=tcp::5055-:5050 -device e1000,netdev=net0"
+      DEBUG: "Y"
+      VIEW: "VNC"
+      WEBVIEW: "Y"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     devices:
-      - /dev/kvm
-      - /dev/net/tun
+      - /dev/kvm:/dev/kvm
+      - /dev/net/tun:/dev/net/tun
     cap_add:
       - NET_ADMIN
     ports:
-      - 8006:8006                 # Web Viewer access
+      - "8006:8007"
+      - "5900:5900"
+      - "5055:5055"
     volumes:
-      - ./vm/win11iso/custom.iso:/custom.iso
-      - ./vm/win11setup/firstboot:/oem
-      - ./vm/win11setup/setupscripts:/data
-      - ./vm/win11storage:/storage
-    
+      - "./vm/win11iso/custom.iso:/custom.iso"
+      - "./vm/win11setup/firstboot:/oem"
+      - "./vm/win11setup/setupscripts:/data"
+      - "./vm/win11storage:/storage"
+      - "./vm/win11setup/setupscripts:/run/import"
+      - "./smb.conf:/etc/samba/smb.conf"

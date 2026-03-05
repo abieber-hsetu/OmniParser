@@ -2,7 +2,11 @@
 Agentic sampling loop that calls the Anthropic API and local implenmentation of anthropic-defined computer use tools.
 """
 from collections.abc import Callable
-from enum import StrEnum
+
+try:
+    from enum import StrEnum
+except ImportError:
+    from strenum import StrEnum
 
 from anthropic import APIResponse
 from anthropic.types import (
@@ -20,6 +24,7 @@ from agent.anthropic_agent import AnthropicActor
 from agent.vlm_agent import VLMAgent
 from agent.vlm_agent_with_orchestrator import VLMOrchestratedAgent
 from executor.anthropic_executor import AnthropicExecutor
+from executor.openai_executor import OpenAIExecutor
 
 BETA_FLAG = "computer-use-2024-10-22"
 
@@ -51,6 +56,7 @@ def sampling_loop_sync(
     omniparser_url: str,
     save_folder: str = "./uploads"
 ):
+    print(f"DEBUG-START: Das gewählte Modell ist: '{model}'")
     """
     Synchronous agentic sampling loop for the assistant/tool interaction of computer use.
     """
@@ -89,7 +95,7 @@ def sampling_loop_sync(
         )
     else:
         raise ValueError(f"Model {model} not supported")
-    executor = AnthropicExecutor(
+    anthropic_executor = AnthropicExecutor(
         output_callback=output_callback,
         tool_output_callback=tool_output_callback,
     )
@@ -107,7 +113,7 @@ def sampling_loop_sync(
             messages.append(screen_info_dict)
             tools_use_needed = actor(messages=messages)
 
-            for message, tool_result_content in executor(tools_use_needed, messages):
+            for message, tool_result_content in anthropic_executor(tools_use_needed, messages):
                 yield message
         
             if not tool_result_content:
@@ -116,12 +122,42 @@ def sampling_loop_sync(
             messages.append({"content": tool_result_content, "role": "user"})
     
     elif model in set(["omniparser + gpt-4o", "omniparser + o1", "omniparser + o3-mini", "omniparser + R1", "omniparser + qwen2.5vl", "omniparser + gpt-4o-orchestrated", "omniparser + o1-orchestrated", "omniparser + o3-mini-orchestrated", "omniparser + R1-orchestrated", "omniparser + qwen2.5vl-orchestrated"]):
+        from executor.openai_executor import OpenAIExecutor
+        openai_executor = OpenAIExecutor(output_callback, tool_output_callback)
+
         while True:
+            # A. Screenshot machen und durch OmniParser analysieren lassen
             parsed_screen = omniparser_client()
+            
+            # B. KI-Entscheidung einholen (GPT-4o entscheidet, welche Box-ID geklickt wird)
+            # tools_use_needed: Die Liste der Tool-Aufrufe (Tupel oder Objekte)
+            # vlm_response_json: Die Antwort der KI mit der "Box ID"
             tools_use_needed, vlm_response_json = actor(messages=messages, parsed_screen=parsed_screen)
 
-            for message, tool_result_content in executor(tools_use_needed, messages):
-                yield message
-        
+            # C. Ausführung durch den OpenAIExecutor
+            # Dieser übernimmt intern: 
+            # - Mapping von Box ID auf Pixel-Koordinaten
+            # - Patching der Tool-Inputs (Tupel-Sicherheit)
+            # - Physische Ausführung in der VM via computer.py
+            tool_result_content = None 
+
+            # Wir nutzen die for-Schleife, um die Generator-Werte (yield) des Executors zu verarbeiten
+            # Dies verhindert den Fehler: "too many values to unpack (expected 2)"
+            for loop_msg, tool_results in openai_executor(
+                response=tools_use_needed, 
+                messages=messages, 
+                parsed_screen=parsed_screen, 
+                vlm_response_json=vlm_response_json
+            ):
+                # UI-Update an Gradio senden
+                yield loop_msg
+                # Den aktuellen Stand der Tool-Ergebnisse speichern
+                tool_result_content = tool_results
+
+            # D. Abbruchbedingung & Historie-Update
+            # Wenn kein Tool mehr benutzt wurde (KI ist fertig), beenden wir die Schleife
             if not tool_result_content:
                 return messages
+
+            # Die Tool-Ergebnisse (z.B. neue Screenshots) für die KI sichtbar machen
+            messages.append({"content": tool_result_content, "role": "user"})

@@ -4,7 +4,11 @@ python app.py --windows_host_url localhost:8006 --omniparser_server_url localhos
 
 import os
 from datetime import datetime
-from enum import StrEnum
+try:
+    from enum import StrEnum
+except ImportError:
+    from strenum import StrEnum
+
 from functools import partial
 from pathlib import Path
 from typing import cast
@@ -22,6 +26,16 @@ from tools import ToolResult
 import requests
 from requests.exceptions import RequestException
 import base64
+import subprocess
+
+def get_host_ip():
+    try:
+        # Führt 'hostname -I' aus und nimmt die erste IP-Adresse in der Liste
+        ip = subprocess.check_output(['hostname', '-I']).decode('utf-8').split()[0]
+        return ip
+    except Exception:
+        # Fallback auf localhost, falls etwas schiefgeht
+        return "127.0.0.1"
 
 CONFIG_DIR = Path("~/.anthropic").expanduser()
 API_KEY_FILE = CONFIG_DIR / "api_key"
@@ -34,9 +48,11 @@ Type a message and press submit to start OmniTool. Press stop to pause, and pres
 
 def parse_arguments():
 
+    host_ip = get_host_ip()
     parser = argparse.ArgumentParser(description="Gradio App")
-    parser.add_argument("--windows_host_url", type=str, default='localhost:8006')
-    parser.add_argument("--omniparser_server_url", type=str, default="localhost:8000")
+    parser.add_argument("--windows_host_url", type=str, default=f'{host_ip}:8006')
+    parser.add_argument("--omniparser_server_url", type=str, default=f'localhost:8000')
+    parser.add_argument("--windows_agent_port", type=int, default=5055)
     return parser.parse_args()
 args = parse_arguments()
 
@@ -177,9 +193,9 @@ def chatbot_output_callback(message, chatbot_state, hide_images=False, sender="b
     message = _render_message(message, hide_images)
     
     if sender == "bot":
-        chatbot_state.append((None, message))
+        chatbot_state.append({"role": "assistant", "content": message})
     else:
-        chatbot_state.append((message, None))
+        chatbot_state.append({"role": "user", "content": message})
     
     # Create a concise version of the chatbot state for printing
     concise_state = [(_truncate_string(user_msg), _truncate_string(bot_msg))
@@ -187,17 +203,29 @@ def chatbot_output_callback(message, chatbot_state, hide_images=False, sender="b
     # print(f"chatbot_output_callback chatbot_state: {concise_state} (truncated)")
 
 def valid_params(user_input, state):
-    """Validate all requirements and return a list of error messages."""
     errors = []
     
-    for server_name, url in [('Windows Host', 'localhost:5000'), ('OmniParser Server', args.omniparser_server_url)]:
+    host_ip = args.windows_host_url.split(':')[0]
+    agent_url = f"{host_ip}:{args.windows_agent_port}"
+    parser_url = args.omniparser_server_url.replace("http://", "").replace("https://", "")
+    
+    # Konfiguration pro Server
+    # Windows Agent braucht meist kein Slash, OmniParser (FastAPI) oft schon
+    check_configs = [
+        ('Windows Host', agent_url, "/probe"),      # Hier ohne Slash
+        ('OmniParser Server', parser_url, "/probe/") # Hier mit Slash
+    ]
+    
+    for server_name, url, endpoint in check_configs:
         try:
-            url = f'http://{url}/probe'
-            response = requests.get(url, timeout=3)
+            full_url = f"http://{url}{endpoint}"
+            print(f"Checking {server_name} at {full_url}...")
+            
+            response = requests.get(full_url, timeout=5)
             if response.status_code != 200:
-                errors.append(f"{server_name} is not responding")
-        except RequestException as e:
-            errors.append(f"{server_name} is not responding")
+                errors.append(f"{server_name} antwortet mit Status {response.status_code}")
+        except Exception as e:
+            errors.append(f"{server_name} ist nicht erreichbar ({str(e)})")
     
     if not state["api_key"].strip():
         errors.append("LLM API Key is not set")
@@ -225,7 +253,7 @@ def process_input(user_input, state):
     )
 
     # Append the user's message to chatbot_messages with None for the assistant's reply
-    state['chatbot_messages'].append((user_input, None))
+    state['chatbot_messages'].append({"role": "user", "content": user_input})
     yield state['chatbot_messages']  # Yield to update the chatbot UI with the user's message
 
     print("state")

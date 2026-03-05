@@ -1,6 +1,9 @@
 import base64
 import time
-from enum import StrEnum
+try:
+    from enum import StrEnum
+except ImportError:
+    from strenum import StrEnum
 from typing import Literal, TypedDict
 
 from PIL import Image
@@ -114,146 +117,122 @@ class ComputerTool(BaseAnthropicTool):
         **kwargs,
     ):
         print(f"action: {action}, text: {text}, coordinate: {coordinate}, is_scaling: {self.is_scaling}")
-        if action in ("mouse_move", "left_click_drag"):
-            if coordinate is None:
-                raise ToolError(f"coordinate is required for {action}")
-            if text is not None:
-                raise ToolError(f"text is not accepted for {action}")
+        
+        # 1. Koordinaten vorbereiten (für alle Maus-Aktionen)
+        x, y = None, None
+        if coordinate is not None:
             if not isinstance(coordinate, (list, tuple)) or len(coordinate) != 2:
                 raise ToolError(f"{coordinate} must be a tuple of length 2")
-            # if not all(isinstance(i, int) and i >= 0 for i in coordinate):
-            if not all(isinstance(i, int) for i in coordinate):
-                raise ToolError(f"{coordinate} must be a tuple of non-negative ints")
             
             if self.is_scaling:
-                x, y = self.scale_coordinates(
-                    ScalingSource.API, coordinate[0], coordinate[1]
-                )
+                x, y = self.scale_coordinates(ScalingSource.API, coordinate[0], coordinate[1])
             else:
                 x, y = coordinate
 
-            # print(f"scaled_coordinates: {x}, {y}")
-            # print(f"offset: {self.offset_x}, {self.offset_y}")
-            
-            # x += self.offset_x # TODO - check if this is needed
-            # y += self.offset_y
-
-            print(f"mouse move to {x}, {y}")
-            
-            if action == "mouse_move":
-                self.send_to_vm(f"pyautogui.moveTo({x}, {y})")
-                return ToolResult(output=f"Moved mouse to ({x}, {y})")
-            elif action == "left_click_drag":
-                current_x, current_y = self.send_to_vm("pyautogui.position()")
-                self.send_to_vm(f"pyautogui.dragTo({x}, {y}, duration=0.5)")
-                return ToolResult(output=f"Dragged mouse from ({current_x}, {current_y}) to ({x}, {y})")
-
+        # 2. KEY & TYPE Aktionen (Tastatur)
         if action in ("key", "type"):
-            if text is None:
-                raise ToolError(f"text is required for {action}")
-            if coordinate is not None:
-                raise ToolError(f"coordinate is not accepted for {action}")
-            if not isinstance(text, str):
-                raise ToolError(output=f"{text} must be a string")
-
+            if text is None: raise ToolError(f"text is required for {action}")
             if action == "key":
-                # Handle key combinations
-                keys = text.split('+')
-                for key in keys:
-                    key = self.key_conversion.get(key.strip(), key.strip())
-                    key = key.lower()
-                    self.send_to_vm(f"pyautogui.keyDown('{key}')")  # Press down each key
-                for key in reversed(keys):
-                    key = self.key_conversion.get(key.strip(), key.strip())
-                    key = key.lower()
-                    self.send_to_vm(f"pyautogui.keyUp('{key}')")    # Release each key in reverse order
+                # ... (Deine bestehende Key-Logik ist okay)
+                self.send_to_vm(f"pyautogui.hotkey(*{[k.strip().lower() for k in text.split('+')]})")
                 return ToolResult(output=f"Pressed keys: {text}")
-            
             elif action == "type":
-                # default click before type TODO: check if this is needed
-                self.send_to_vm("pyautogui.click()")
-                self.send_to_vm(f"pyautogui.typewrite('{text}', interval={TYPING_DELAY_MS / 1000})")
+                self.send_to_vm(f"pyautogui.click({x}, {y})") if x else self.send_to_vm("pyautogui.click()")
+                self.send_to_vm(f"pyautogui.typewrite('{text}', interval=0.1)")
                 self.send_to_vm("pyautogui.press('enter')")
-                screenshot_base64 = (await self.screenshot()).base64_image
-                return ToolResult(output=text, base64_image=screenshot_base64)
+                return ToolResult(output=text)
 
-        if action in (
-            "left_click",
-            "right_click",
-            "double_click",
-            "middle_click",
-            "screenshot",
-            "cursor_position",
-            "left_press",
-        ):
-            if text is not None:
-                raise ToolError(f"text is not accepted for {action}")
-            if coordinate is not None:
-                raise ToolError(f"coordinate is not accepted for {action}")
+        # 3. MAUS Aktionen (Klicks & Bewegung)
+        if action in ("mouse_move", "left_click", "right_click", "double_click", "middle_click", "left_click_drag"):
+            
+            # Für dragTo brauchen wir Start-Koordinaten
+            if action == "left_click_drag":
+                self.send_to_vm(f"pyautogui.dragTo({x}, {y}, duration=0.5)")
+                return ToolResult(output=f"Dragged to ({x}, {y})")
 
-            if action == "screenshot":
-                return await self.screenshot()
-            elif action == "cursor_position":
-                x, y = self.send_to_vm("pyautogui.position()")
-                x, y = self.scale_coordinates(ScalingSource.COMPUTER, x, y)
-                return ToolResult(output=f"X={x},Y={y}")
-            else:
-                if action == "left_click":
-                    self.send_to_vm("pyautogui.click()")
-                elif action == "right_click":
-                    self.send_to_vm("pyautogui.rightClick()")
-                elif action == "middle_click":
-                    self.send_to_vm("pyautogui.middleClick()")
-                elif action == "double_click":
-                    self.send_to_vm("pyautogui.doubleClick()")
-                elif action == "left_press":
-                    self.send_to_vm("pyautogui.mouseDown()")
-                    time.sleep(1)
-                    self.send_to_vm("pyautogui.mouseUp()")
-                return ToolResult(output=f"Performed {action}")
-        if action in ("scroll_up", "scroll_down"):
-            if action == "scroll_up":
-                self.send_to_vm("pyautogui.scroll(100)")
-            elif action == "scroll_down":
-                self.send_to_vm("pyautogui.scroll(-100)")
-            return ToolResult(output=f"Performed {action}")
-        if action == "hover":
-            return ToolResult(output=f"Performed {action}")
-        if action == "wait":
+            # MAPPING: Hier senden wir die Koordinaten MIT an den Agenten
+            if action == "mouse_move":
+                self.send_to_vm(f"pyautogui.moveTo({x}, {y}, duration=0.2)")
+                return ToolResult(output=f"Moved mouse to ({x}, {y})")
+            
+            elif action == "left_click":
+                self.send_to_vm(f"pyautogui.click({x}, {y})")
+            elif action == "right_click":
+                self.send_to_vm(f"pyautogui.rightClick({x}, {y})")
+            elif action == "double_click":
+                # WICHTIG: Hier klickt er jetzt wirklich auf das Icon!
+                self.send_to_vm(f"pyautogui.doubleClick({x}, {y})")
+            
+            return ToolResult(output=f"Performed {action} at ({x}, {y})")
+
+        # 4. SONSTIGE Aktionen (Screenshot, Wait, etc.)
+        if action == "screenshot":
+            return await self.screenshot()
+        elif action == "wait":
             time.sleep(1)
-            return ToolResult(output=f"Performed {action}")
+            return ToolResult(output="Waited 1s")
+            
         raise ToolError(f"Invalid action: {action}")
 
-    def send_to_vm(self, action: str):
+    def send_to_vm(self, action: str, mode: str = "shell"):
         """
-        Executes a python command on the server. Only return tuple of x,y when action is "pyautogui.position()"
+        Sendet einen Befehl an den Windows-Agenten.
+        'shell' (Standard): Startet einen neuen Python-Prozess in der VM (sicher, aber langsamer).
+        'gui': Nutzt die interne Instanz des Agenten für sofortige Aktionen (schnell).
         """
         prefix = "import pyautogui; pyautogui.FAILSAFE = False;"
-        command_list = ["python", "-c", f"{prefix} {action}"]
-        parse = action == "pyautogui.position()"
-        if parse:
-            command_list[-1] = f"{prefix} print({action})"
+        parse = (action == "pyautogui.position()")
+        
+        # Payload-Konstruktion basierend auf dem Modus
+        if mode == "shell":
+            command_list = ["python", "-c", f"{prefix} {action}"]
+            if parse:
+                command_list[-1] = f"{prefix} print({action})"
+            
+            payload = {
+                "mode": "shell",
+                "command": command_list
+            }
+        else:
+            # GUI-Modus: Hier schicken wir die Aktion direkt an den 'Butler'
+            payload = {
+                "mode": "gui",
+                "action": action  # z.B. "mouse_move", "left_click", etc.
+            }
 
         try:
-            print(f"sending to vm: {command_list}")
+            print(f"--- Sending to VM ({mode} mode) ---")
+            # Port 5055 ist unser gemappter Agenten-Port
             response = requests.post(
-                f"http://localhost:5000/execute", 
+                "http://localhost:5055/execute", 
                 headers={'Content-Type': 'application/json'},
-                json={"command": command_list},
+                json=payload,
                 timeout=90
             )
-            time.sleep(0.7) # avoid async error as actions take time to complete
-            print(f"action executed")
+            
+            # Kurze Pause, damit die VM Zeit hat, die UI-Änderung zu verarbeiten
+            time.sleep(0.5) 
+            
             if response.status_code != 200:
+                print(f"Error: Agent responded with status {response.status_code}")
                 raise ToolError(f"Failed to execute command. Status code: {response.status_code}")
+
+            result_data = response.json()
+            print(f"Action executed successfully.")
+
+            # Falls wir die Position abfragen, parsen wir das Ergebnis aus dem Output
             if parse:
-                output = response.json()['output'].strip()
+                output = result_data.get('output', '').strip()
                 match = re.search(r'Point\(x=(\d+),\s*y=(\d+)\)', output)
                 if not match:
                     raise ToolError(f"Could not parse coordinates from output: {output}")
                 x, y = map(int, match.groups())
                 return x, y
+            
+            return result_data
+
         except requests.exceptions.RequestException as e:
+            print(f"Network Error: {str(e)}")
             raise ToolError(f"An error occurred while trying to execute the command: {str(e)}")
 
     async def screenshot(self):
@@ -311,9 +290,12 @@ class ComputerTool(BaseAnthropicTool):
         """Return width and height of the screen"""
         try:
             response = requests.post(
-                f"http://localhost:5000/execute",
+                f"http://localhost:5055/execute",
                 headers={'Content-Type': 'application/json'},
-                json={"command": ["python", "-c", "import pyautogui; print(pyautogui.size())"]},
+                json={
+                    "mode": "shell", # WICHTIG: Damit der Verteiler richtig abbiegt!
+                    "command": ["python", "-c", "import pyautogui; print(pyautogui.size())"]
+                },
                 timeout=90
             )
             if response.status_code != 200:

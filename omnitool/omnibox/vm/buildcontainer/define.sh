@@ -1,6 +1,139 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# Hilfsfunktionen, die oft aufgerufen werden (Dummys)
+info() { echo "[INFO] $1"; }
+warn() { echo "[WARN] $1"; }
+error() { echo "[ERROR] $1"; exit 1; }
+html() { echo "<p>$1</p>" >> /run/shm/status.html; }
+
+# Verhindert alle "unbound variable" Fehler auf einmal
+: "${DEBUG:="N"}"; : "${PLATFORM:="x64"}"; : "${ENGINE:="docker"}"; 
+: "${RAM_SIZE:="4G"}"; : "${CPU_CORES:="2"}"; : "${DISK_SIZE:="64G"}";
+: "${BOOT_INDEX:="9"}"; : "${BOOT_MODE:="uefi"}"; : "${VNC_PORT:="5900"}";
+: "${WSS_PORT:="8001"}"; : "${WEB_PORT:="8006"}"; : "${MON_PORT:="8000"}";
+: "${DHCP:="N"}"; : "${BRIDGE:="br0"}"; : "${PROCESS:="qemu"}";
+: "${HOST:="windows"}"; : "${KERNEL:="5"}"; : "${WSD_PORT:="3702"}";
+: "${ALLOCATE:="N"}"; : "${STORAGE:="/storage"}"; : "${APP:="windows"}";
+export DEBUG PLATFORM ENGINE RAM_SIZE CPU_CORES DISK_SIZE BOOT_INDEX BOOT_MODE VNC_PORT WSS_PORT WEB_PORT MON_PORT DHCP BRIDGE PROCESS HOST KERNEL WSD_PORT ALLOCATE STORAGE APP
+
+# --- 1. SYSTEM & IDENTITÄT ---
+: "${APP:="windows"}"
+: "${VERSION:="11"}"
+: "${ENGINE:="docker"}"
+: "${ROOTLESS:="N"}"
+: "${PRIVILEGED:="N"}"
+: "${HOST:="windows"}"
+: "${PROCESS:="qemu"}"
+
+# --- 2. HARDWARE-RESOURCEN ---
+: "${RAM_SIZE:="4G"}"
+: "${CPU_CORES:="2"}"
+: "${DISK_SIZE:="64G"}"
+: "${ALLOCATE:="N"}"
+: "${MACHINE:="q35"}"
+: "${PLATFORM:="x64"}"
+: "${SOCKETS:="1"}"
+: "${CORES:="$CPU_CORES"}"
+: "${THREADS:="1"}"
+: "${ARCH:="x86_64"}"
+export ARCH
+
+# --- 3. BOOT & ISO OPTIONEN ---
+: "${BOOT:=""}"
+: "${BOOT_INDEX:="9"}"
+: "${BOOT_MODE:="uefi"}"
+: "${RECOVERY:="N"}"
+
+# --- 4. NETZWERK (Wichtig für dnsmasq!) ---
+: "${DHCP:="N"}"
+: "${DNS:="8.8.8.8"}"
+: "${BRIDGE:=""}"
+: "${NET_DEVICE:="eth0"}"
+: "${GATEWAY:="172.17.0.1"}"
+: "${ADDRESS:="172.17.0.2"}"
+: "${NET_MASK:="255.255.255.0"}"
+: "${NET_SPEED:="1000"}"
+: "${NET_MTU:="1500"}"
+: "${NET_MODEL:="ve1000"}"
+
+# --- 5. PORTS & DISCOVERY ---
+: "${VNC_PORT:="5900"}"
+: "${WSS_PORT:="8001"}"
+: "${WEB_PORT:="8006"}"
+: "${MON_PORT:="8000"}"
+: "${WSD_PORT:="3702"}"
+: "${LLMNR_PORT:="5355"}"
+: "${NBNS_PORT:="137"}"
+
+# --- 6. SPEICHERPFADE ---
+: "${STORAGE:="/storage"}"
+: "${DIST:="/run/shm"}"
+: "${TMP:="$STORAGE/tmp"}"
+DNSMASQ="/bin/true"
+
+# --- Beschleuniger-Fix für Windows 24H2 ---
+# : "${ACCEL:="whpx:tcg"}"
+: "${KVM:="Y"}"
+: "${CPU_MODEL:="qemu64"}" # Manche WHPX-Versionen mögen 'host' nicht, 'qemu64' ist sicherer
+
+export ACCEL KVM CPU_MODEL
+
+# --- Prozess- & QEMU-Parameter ---
+# Wir prüfen erst, ob KVM im Linux-Kernel (WSL) verfügbar ist
+if [ -e /dev/kvm ]; then
+    info "KVM device found, enabling hardware acceleration."
+    KVM="Y"
+    ACCEL="kvm"
+    CPU_MODEL="host"
+else
+    # Wenn KVM fehlt (typisch für Windows 24H2), versuchen wir WHPX oder TCG
+    warn "KVM device not found! Using fallback acceleration."
+    KVM="N"
+    
+    # WHPX funktioniert am besten, wenn wir QEMU sagen, er soll Windows-Beschleunigung nutzen
+    # Wenn wir in Docker auf WSL2 sind, ist 'whpx' oft über den Host-Pass-Through erreichbar
+    # Falls das fehlschlägt, nutzt QEMU automatisch TCG (Emulation)
+    ACCEL="whpx:tcg,thread=multi"
+    
+    # 'host' funktioniert bei Emulation oft nicht, daher ein sicheres Modell
+    CPU_MODEL="qemu64"
+fi
+
+# Jetzt exportieren wir die finalen Werte, damit boot.sh sie sieht
+export KVM ACCEL CPU_MODEL
+
+# Hilfsvariablen für QEMU (falls noch nicht gesetzt)
+: "${ARGUMENTS:=""}"
+: "${CPU_FLAGS:=""}"
+: "${KVM_OPTS:=""}"
+export ARGUMENTS CPU_FLAGS KVM_OPTS
+
+echo "Basis-Variablen geladen. Beschleuniger: $ACCEL (KVM=$KVM)"
+
+# --- 7. EXPORTIERE ALLES FÜR SUB-SKRIPTE ---
+export APP VERSION ENGINE ROOTLESS PRIVILEGED HOST PROCESS RAM_SIZE CPU_CORES DISK_SIZE ALLOCATE KVM MACHINE PLATFORM BOOT BOOT_INDEX BOOT_MODE RECOVERY DHCP DNS BRIDGE NET_DEVICE GATEWAY ADDRESS NET_MASK NET_SPEED NET_MTU NET_MODEL VNC_PORT WSS_PORT WEB_PORT MON_PORT WSD_PORT LLMNR_PORT NBNS_PORT STORAGE DIST TMP
+
+# Bereinigt die Variablen von unsichtbaren Windows-Steuerzeichen
+BRIDGE=$(echo "${BRIDGE}" | tr -d '\r')
+DNS=$(echo "${DNS}" | tr -d '\r')
+ADDRESS=$(echo "${ADDRESS}" | tr -d '\r')
+DHCP=$(echo "${DHCP}" | tr -d '\r')
+
+# Die wichtigsten Pfade
+export STORAGE="/storage"
+export TMP="$STORAGE/tmp"
+
+# Standard-Werte für die Installation
+export VERSION="win11"
+export LANGUAGE="en-US"
+export DETECTED=""
+export CUSTOM=""
+export DEBUG="${DEBUG:-N}"
+export INTERACTIVE="${INTERACTIVE:-N}"
+
+echo "Basis-Variablen geladen."
+
 : "${WIDTH:=""}"
 : "${HEIGHT:=""}"
 : "${VERIFY:=""}"
@@ -16,6 +149,14 @@ set -Eeuo pipefail
 
 MIRRORS=4
 PLATFORM="x64"
+
+# Radikale Säuberung aller Netzwerk-Variablen von Windows-Resten
+BRIDGE=$(echo "${BRIDGE:-br0}" | tr -d '\r')
+DHCP=$(echo "${DHCP:-N}" | tr -d '\r')
+DNS=$(echo "${DNS:-8.8.8.8}" | tr -d '\r')
+GATEWAY=$(echo "${GATEWAY:-172.17.0.1}" | tr -d '\r')
+ADDRESS=$(echo "${ADDRESS:-172.17.0.2}" | tr -d '\r')
+
 
 parseVersion() {
 
@@ -34,6 +175,19 @@ parseVersion() {
       ;;
   esac
 
+  return 0
+}
+
+setOwner() {
+  local file="$1"
+  # Wenn die Datei nicht existiert, machen wir nichts
+  [ ! -e "$file" ] && return 0
+  
+  # Setzt den Besitzer auf Root (Standard im Container)
+  # Falls Fehler auftreten, gibt die Funktion 1 zurück
+  chown root:root "$file" || return 1
+  chmod 660 "$file" || return 1
+  
   return 0
 }
 

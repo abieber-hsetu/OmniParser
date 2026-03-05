@@ -1,5 +1,9 @@
 # from ultralytics import YOLO
 import os
+os.environ['FLAGS_enable_pir_api'] = '0'
+os.environ['FLAGS_enable_onednn'] = '0'
+os.environ['FLAGS_enable_new_executor'] = '0'
+os.environ['FLAGS_enable_executor_for_pir'] = '0'
 import io
 import base64
 import time
@@ -15,20 +19,33 @@ import sys
 import os
 import cv2
 import numpy as np
+
+os.environ['FLAGS_allocator_strategy'] = 'auto_growth'
+os.environ['FLAGS_fraction_of_gpu_memory_to_use'] = '0.1'
+os.environ['FLAGS_selected_gpus'] = '0'
+os.environ['FLAGS_cudnn_deterministic'] = 'True'
+
 # %matplotlib inline
 from matplotlib import pyplot as plt
 import easyocr
 from paddleocr import PaddleOCR
-reader = easyocr.Reader(['en'])
+
+# Initialisierung von EasyOCR (bleibt unverändert)
+reader = easyocr.Reader(['en', 'de'])
+
+# KORRIGIERTE Initialisierung von PaddleOCR gemäß GitHub-Doku
+# Wir behalten nur die Parameter, die offiziell unterstützt werden
 paddle_ocr = PaddleOCR(
-    lang='en',  # other lang also available
-    use_angle_cls=False,
-    use_gpu=False,  # using cuda will conflict with pytorch in the same process
-    show_log=False,
-    max_batch_size=1024,
-    use_dilation=True,  # improves accuracy
-    det_db_score_mode='slow',  # improves accuracy
-    rec_batch_num=1024)
+    lang='en',                # Unterstützt laut Quickstart
+    use_angle_cls=False,      # Unterstützt laut Inferenz-Guide
+    rec_batch_num=64,
+    #det_model_dir='weights/paddle/det',
+    #rec_model_dir='weights/paddle/rec',
+    #cls_model_dir='weights/paddle/cls',
+)
+
+
+
 import time
 import base64
 
@@ -42,6 +59,30 @@ from torchvision.transforms import ToPILImage
 import supervision as sv
 import torchvision.transforms as T
 from util.box_annotator import BoxAnnotator 
+
+import sys
+from unittest.mock import MagicMock
+import importlib.util
+def mock_flash_attn():
+    # Wir erstellen ein echtes Modul-Objekt statt nur eines Mocks
+    module_name = 'flash_attn'
+    spec = importlib.util.spec_from_loader(module_name, loader=None)
+    flash_attn = importlib.util.module_from_spec(spec)
+    
+    # Wir fügen die notwendigen Attribute hinzu, damit find_spec nicht abstürzt
+    flash_attn.__spec__ = spec
+    flash_attn.flash_attn_2_beam_search = MagicMock()
+    
+    # Wir registrieren das Modul und seine Unterpfade im System
+    sys.modules[module_name] = flash_attn
+    sys.modules["flash_attn.flash_attn_interface"] = MagicMock()
+    sys.modules["flash_attn.ops"] = MagicMock()
+    sys.modules["flash_attn.layers"] = MagicMock()
+    sys.modules["flash_attn.layers.rotary"] = MagicMock()
+
+# Falls flash_attn nicht installiert ist (was unter Windows der Fall ist)
+if importlib.util.find_spec("flash_attn") is None:
+    mock_flash_attn()
 
 
 def get_caption_model_processor(model_name, model_name_or_path="Salesforce/blip2-opt-2.7b", device=None):
@@ -62,9 +103,9 @@ def get_caption_model_processor(model_name, model_name_or_path="Salesforce/blip2
         from transformers import AutoProcessor, AutoModelForCausalLM 
         processor = AutoProcessor.from_pretrained("microsoft/Florence-2-base", trust_remote_code=True)
         if device == 'cpu':
-            model = AutoModelForCausalLM.from_pretrained(model_name_or_path, torch_dtype=torch.float32, trust_remote_code=True)
+            model = AutoModelForCausalLM.from_pretrained(model_name_or_path, torch_dtype=torch.float32, trust_remote_code=True, attn_implementation="sdpa")
         else:
-            model = AutoModelForCausalLM.from_pretrained(model_name_or_path, torch_dtype=torch.float16, trust_remote_code=True).to(device)
+            model = AutoModelForCausalLM.from_pretrained(model_name_or_path, torch_dtype=torch.float16, trust_remote_code=True, attn_implementation="sdpa").to(device)
     return {'model': model.to(device), 'processor': processor}
 
 
@@ -176,7 +217,11 @@ def get_parsed_content_icon_phi3v(filtered_boxes, ocr_bbox, image_source, captio
     return generated_texts
 
 def remove_overlap(boxes, iou_threshold, ocr_bbox=None):
-    assert ocr_bbox is None or isinstance(ocr_bbox, List)
+    if ocr_bbox is None:
+        ocr_bbox = []
+        
+    # Die Assertion sollte jetzt nur noch sicherstellen, dass es eine Liste ist
+    assert isinstance(ocr_bbox, list), "ocr_bbox muss eine Liste sein (ggf. leer)"
 
     def box_area(box):
         return (box[2] - box[0]) * (box[3] - box[1])
@@ -271,42 +316,40 @@ def remove_overlap_new(boxes, iou_threshold, ocr_bbox=None):
         box1 = box1_elem['bbox']
         is_valid_box = True
         for j, box2_elem in enumerate(boxes):
-            # keep the smaller box
             box2 = box2_elem['bbox']
             if i != j and IoU(box1, box2) > iou_threshold and box_area(box1) > box_area(box2):
                 is_valid_box = False
                 break
+        
         if is_valid_box:
             if ocr_bbox:
-                # keep yolo boxes + prioritize ocr label
+                # ... (Dein existierender Code für ocr_labels Logik)
                 box_added = False
                 ocr_labels = ''
                 for box3_elem in ocr_bbox:
+                    # (Hier bleibt dein Code gleich...)
                     if not box_added:
                         box3 = box3_elem['bbox']
-                        if is_inside(box3, box1): # ocr inside icon
-                            # box_added = True
-                            # delete the box3_elem from ocr_bbox
+                        if is_inside(box3, box1):
                             try:
-                                # gather all ocr labels
                                 ocr_labels += box3_elem['content'] + ' '
                                 filtered_boxes.remove(box3_elem)
-                            except:
-                                continue
-                            # break
-                        elif is_inside(box1, box3): # icon inside ocr, don't added this icon box, no need to check other ocr bbox bc no overlap between ocr bbox, icon can only be in one ocr box
+                            except: continue
+                        elif is_inside(box1, box3):
                             box_added = True
                             break
-                        else:
-                            continue
+                
                 if not box_added:
                     if ocr_labels:
                         filtered_boxes.append({'type': 'icon', 'bbox': box1_elem['bbox'], 'interactivity': True, 'content': ocr_labels, 'source':'box_yolo_content_ocr'})
                     else:
                         filtered_boxes.append({'type': 'icon', 'bbox': box1_elem['bbox'], 'interactivity': True, 'content': None, 'source':'box_yolo_content_yolo'})
             else:
-                filtered_boxes.append(box1)
-    return filtered_boxes # torch.tensor(filtered_boxes)
+                # KORREKTUR HIER: Füge das ganze Element hinzu, nicht nur box1!
+                # Das verhindert den TypeError im weiteren Verlauf.
+                filtered_boxes.append(box1_elem) 
+
+    return filtered_boxes
 
 
 def load_image(image_path: str) -> Tuple[np.array, torch.Tensor]:
@@ -418,7 +461,15 @@ def get_som_labeled_img(image_source: Union[str, Image.Image], model=None, BOX_T
     if not imgsz:
         imgsz = (h, w)
     # print('image size:', w, h)
-    xyxy, logits, phrases = predict_yolo(model=model, image=image_source, box_threshold=BOX_TRESHOLD, imgsz=imgsz, scale_img=scale_img, iou_threshold=0.1)
+    yolo_result = predict_yolo(model=model, image=image_source, box_threshold=BOX_TRESHOLD, imgsz=imgsz, scale_img=scale_img, iou_threshold=0.1)
+    
+    if yolo_result is not None and len(yolo_result) == 3:
+        xyxy, logits, phrases = yolo_result
+    else:
+        print("WARNUNG: YOLO hat keine Icons gefunden oder gab None zurueck.")
+        xyxy = torch.zeros((0, 4))
+        logits = torch.zeros((0,))
+        phrases = []
     xyxy = xyxy / torch.Tensor([w, h, w, h]).to(xyxy.device)
     image_source = np.asarray(image_source)
     phrases = [str(i) for i in range(len(phrases))]
@@ -429,61 +480,113 @@ def get_som_labeled_img(image_source: Union[str, Image.Image], model=None, BOX_T
         ocr_bbox=ocr_bbox.tolist()
     else:
         print('no ocr bbox!!!')
-        ocr_bbox = None
+        ocr_bbox = []
 
-    ocr_bbox_elem = [{'type': 'text', 'bbox':box, 'interactivity':False, 'content':txt, 'source': 'box_ocr_content_ocr'} for box, txt in zip(ocr_bbox, ocr_text) if int_box_area(box, w, h) > 0] 
-    xyxy_elem = [{'type': 'icon', 'bbox':box, 'interactivity':True, 'content':None} for box in xyxy.tolist() if int_box_area(box, w, h) > 0]
+    # 1. Sicherstellen, dass Listen existieren
+    if ocr_bbox is None: ocr_bbox = []
+    if ocr_text is None: ocr_text = []
+
+    # 2. OCR-Elemente sicher erstellen
+    ocr_bbox_elem = []
+    for box, txt in zip(ocr_bbox, ocr_text):
+        try:
+            if int_box_area(box, w, h) > 0:
+                ocr_bbox_elem.append({'type': 'text', 'bbox': box, 'interactivity': False, 'content': txt, 'source': 'box_ocr_content_ocr'})
+        except: continue
+
+    # 3. Icon-Elemente sicher erstellen
+    xyxy_elem = []
+    try:
+        if hasattr(xyxy, 'tolist'):
+            for box in xyxy.tolist():
+                if int_box_area(box, w, h) > 0:
+                    xyxy_elem.append({'type': 'icon', 'bbox': box, 'interactivity': True, 'content': None})
+    except: pass
+
+    # 4. Überlappung prüfen
     filtered_boxes = remove_overlap_new(boxes=xyxy_elem, iou_threshold=iou_threshold, ocr_bbox=ocr_bbox_elem)
-    
-    # sort the filtered_boxes so that the one with 'content': None is at the end, and get the index of the first 'content': None
-    filtered_boxes_elem = sorted(filtered_boxes, key=lambda x: x['content'] is None)
-    # get the index of the first 'content': None
-    starting_idx = next((i for i, box in enumerate(filtered_boxes_elem) if box['content'] is None), -1)
-    filtered_boxes = torch.tensor([box['bbox'] for box in filtered_boxes_elem])
-    print('len(filtered_boxes):', len(filtered_boxes), starting_idx)
 
-    # get parsed icon local semantics
-    time1 = time.time()
-    if use_local_semantics:
-        caption_model = caption_model_processor['model']
-        if 'phi3_v' in caption_model.config.model_type: 
-            parsed_content_icon = get_parsed_content_icon_phi3v(filtered_boxes, ocr_bbox, image_source, caption_model_processor)
-        else:
-            parsed_content_icon = get_parsed_content_icon(filtered_boxes, starting_idx, image_source, caption_model_processor, prompt=prompt,batch_size=batch_size)
-        ocr_text = [f"Text Box ID {i}: {txt}" for i, txt in enumerate(ocr_text)]
-        icon_start = len(ocr_text)
-        parsed_content_icon_ls = []
-        # fill the filtered_boxes_elem None content with parsed_content_icon in order
+    # 5. Sortierung und Index-Findung (Hier lag der Fehler!)
+    filtered_boxes_elem = []
+    starting_idx = -1
+    if filtered_boxes:
+        # Sicherstellen, dass wir nur sortieren, wenn es Dictionaries sind
+        filtered_boxes_elem = sorted(filtered_boxes, key=lambda x: (x.get('content') is None) if isinstance(x, dict) else True)
         for i, box in enumerate(filtered_boxes_elem):
-            if box['content'] is None:
-                box['content'] = parsed_content_icon.pop(0)
-        for i, txt in enumerate(parsed_content_icon):
-            parsed_content_icon_ls.append(f"Icon Box ID {str(i+icon_start)}: {txt}")
-        parsed_content_merged = ocr_text + parsed_content_icon_ls
+            if isinstance(box, dict) and box.get('content') is None:
+                starting_idx = i
+                break
+
+    # 6. Tensor erstellen
+    if filtered_boxes_elem:
+        filtered_boxes_tensor = torch.tensor([box['bbox'] for box in filtered_boxes_elem if isinstance(box, dict) and 'bbox' in box])
     else:
-        ocr_text = [f"Text Box ID {i}: {txt}" for i, txt in enumerate(ocr_text)]
-        parsed_content_merged = ocr_text
-    print('time to get parsed content:', time.time()-time1)
+        filtered_boxes_tensor = torch.zeros((0, 4))
 
-    filtered_boxes = box_convert(boxes=filtered_boxes, in_fmt="xyxy", out_fmt="cxcywh")
+    # --- Lokale Semantik (Beschreibungen) ---
+    parsed_content_icon_ls = []
+    time1 = time.time()
 
-    phrases = [i for i in range(len(filtered_boxes))]
+    if use_local_semantics and len(filtered_boxes_tensor) > 0:
+        try:
+            caption_model = caption_model_processor['model']
+            if 'phi3_v' in caption_model.config.model_type: 
+                parsed_content_icon = get_parsed_content_icon_phi3v(filtered_boxes_tensor, ocr_bbox, image_source, caption_model_processor)
+            else:
+                parsed_content_icon = get_parsed_content_icon(filtered_boxes_tensor, starting_idx, image_source, caption_model_processor, prompt=prompt, batch_size=batch_size)
+            
+            # Content in Dictionaries füllen
+            for i, box in enumerate(filtered_boxes_elem):
+                if isinstance(box, dict) and box.get('content') is None and len(parsed_content_icon) > 0:
+                    box['content'] = parsed_content_icon.pop(0)
+            
+            icon_start = len(ocr_text)
+            for i, txt in enumerate(parsed_content_icon):
+                parsed_content_icon_ls.append(f"Icon Box ID {str(i+icon_start)}: {txt}")
+        except Exception as e:
+            print(f"Semantik-Fehler uebersprungen: {e}")
+
+    # 7. Finale Listen-Zusammenführung
+    ocr_text_formatted = [f"Text Box ID {i}: {txt}" for i, txt in enumerate(ocr_text)]
+    parsed_content_list = ocr_text_formatted + parsed_content_icon_ls
+
+    # 8. Zeichnen und Rückgabe (Wichtig: phrases muss Länge von boxes haben)
+    phrases = [str(i) for i in range(len(filtered_boxes_tensor))]
     
-    # draw boxes
-    if draw_bbox_config:
-        annotated_frame, label_coordinates = annotate(image_source=image_source, boxes=filtered_boxes, logits=logits, phrases=phrases, **draw_bbox_config)
-    else:
-        annotated_frame, label_coordinates = annotate(image_source=image_source, boxes=filtered_boxes, logits=logits, phrases=phrases, text_scale=text_scale, text_padding=text_padding)
-    
-    pil_img = Image.fromarray(annotated_frame)
-    buffered = io.BytesIO()
-    pil_img.save(buffered, format="PNG")
-    encoded_image = base64.b64encode(buffered.getvalue()).decode('ascii')
-    if output_coord_in_ratio:
-        label_coordinates = {k: [v[0]/w, v[1]/h, v[2]/w, v[3]/h] for k, v in label_coordinates.items()}
-        assert w == annotated_frame.shape[1] and h == annotated_frame.shape[0]
+    try:
+        # FALL A: Wir haben Boxen gefunden -> Zeichnen
+        if len(filtered_boxes_tensor) > 0:
+            phrases = [str(i) for i in range(len(filtered_boxes_tensor))]
+            boxes_to_draw = box_convert(boxes=filtered_boxes_tensor, in_fmt="xyxy", out_fmt="cxcywh")
 
-    return encoded_image, label_coordinates, filtered_boxes_elem
+            if draw_bbox_config:
+                annotated_frame, label_coordinates = annotate(image_source=image_source, boxes=boxes_to_draw, logits=logits, phrases=phrases, **draw_bbox_config)
+            else:
+                annotated_frame, label_coordinates = annotate(image_source=image_source, boxes=boxes_to_draw, logits=logits, phrases=phrases, text_scale=text_scale, text_padding=text_padding)
+            
+            pil_img = Image.fromarray(annotated_frame)
+        
+        # FALL B: Keine Boxen gefunden -> Originalbild nehmen
+        else:
+            print("INFO: Keine Boxen zum Zeichnen gefunden. Gebe Originalbild zurueck.")
+            label_coordinates = {}
+            pil_img = image_source if isinstance(image_source, Image.Image) else Image.fromarray(image_source)
+
+        # Bild-Encoding (funktioniert für beide Fälle)
+        buffered = io.BytesIO()
+        pil_img.save(buffered, format="PNG")
+        encoded_image = base64.b64encode(buffered.getvalue()).decode('ascii')
+        
+        # Koordinaten-Umrechnung nur wenn welche da sind
+        if output_coord_in_ratio and len(label_coordinates) > 0:
+            label_coordinates = {k: [v[0]/w, v[1]/h, v[2]/w, v[3]/h] for k, v in label_coordinates.items()}
+            
+        return encoded_image, label_coordinates, parsed_content_list
+
+    except Exception as e:
+        print(f"Kritischer Fehler im Zeichen-Prozess: {e}")
+        # Absoluter Fallback: Leeres Resultat, damit Gradio nicht abstürzt
+        return "", {}, []
 
 
 def get_xywh(input):
@@ -501,40 +604,107 @@ def get_xywh_yolo(input):
     x, y, w, h = int(x), int(y), int(w), int(h)
     return x, y, w, h
 
-def check_ocr_box(image_source: Union[str, Image.Image], display_img = True, output_bb_format='xywh', goal_filtering=None, easyocr_args=None, use_paddleocr=False):
+def check_ocr_box(image_source, display_img=True, output_bb_format='xywh', goal_filtering=None, easyocr_args=None, use_paddleocr=False):
+    # 1. Bild-Vorbereitung
     if isinstance(image_source, str):
         image_source = Image.open(image_source)
     if image_source.mode == 'RGBA':
-        # Convert RGBA to RGB to avoid alpha channel issues
         image_source = image_source.convert('RGB')
-    image_np = np.array(image_source)
+    
     w, h = image_source.size
-    if use_paddleocr:
-        if easyocr_args is None:
-            text_threshold = 0.5
+    image_np = np.array(image_source)
+    
+    # Initialisierung der Rückgabewerte
+    coord = []
+    text = []
+
+    try:
+        if use_paddleocr:
+            # --- PADDLE OCR PFAD ---
+            # Hinweis: Falls die Boxen 34, 35, 36 immer noch springen, 
+            # liegt es am internen 'unwarping'. 
+            result = paddle_ocr.ocr(image_np)
+            
+            if result and isinstance(result, list) and len(result) > 0:
+                res = result[0]
+                
+                # VERARBEITUNG: Neues PaddleX / v3+ Format (Dictionary)
+                if isinstance(res, dict) and 'rec_texts' in res and 'rec_boxes' in res:
+                    texts_list = res['rec_texts']
+                    boxes_list = res['rec_boxes']
+                    
+                    for i in range(len(texts_list)):
+                        content = str(texts_list[i]).strip()
+                        box = boxes_list[i]
+                        
+                        if len(box) >= 4:
+                            # Wir berechnen die engstmögliche Box (Tight Bounding Box)
+                            # Das löst das Problem von "zu großen" Boxen bei schrägem Text
+                            if isinstance(box[0], (list, np.ndarray, tuple)):
+                                x_coords = [p[0] for p in box]
+                                y_coords = [p[1] for p in box]
+                            else:
+                                # Fallback falls [x1, y1, x2, y2, ...]
+                                x_coords = box[0::2]
+                                y_coords = box[1::2]
+                            
+                            x1, y1, x2, y2 = min(x_coords), min(y_coords), max(x_coords), max(y_coords)
+
+                            # Filter gegen Rauschen und winzige Boxen (wie Box 34-36)
+                            if len(content) > 0 and (x2 - x1) > 2 and (y2 - y1) > 2:
+                                coord.append([float(x1), float(y1), float(x2), float(y2)])
+                                text.append(content)
+                
+                # VERARBEITUNG: Klassisches PaddleOCR Format (Liste)
+                elif isinstance(res, list):
+                    for line in res:
+                        if len(line) > 1:
+                            box = line[0]
+                            content = line[1][0]
+                            x_coords = [p[0] for p in box]
+                            y_coords = [p[1] for p in box]
+                            coord.append([min(x_coords), min(y_coords), max(x_coords), max(y_coords)])
+                            text.append(content)
+        
         else:
-            text_threshold = easyocr_args['text_threshold']
-        result = paddle_ocr.ocr(image_np, cls=False)[0]
-        coord = [item[0] for item in result if item[1][1] > text_threshold]
-        text = [item[1][0] for item in result if item[1][1] > text_threshold]
-    else:  # EasyOCR
-        if easyocr_args is None:
-            easyocr_args = {}
-        result = reader.readtext(image_np, **easyocr_args)
-        coord = [item[0] for item in result]
-        text = [item[1] for item in result]
-    if display_img:
-        opencv_img = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
-        bb = []
-        for item in coord:
-            x, y, a, b = get_xywh(item)
-            bb.append((x, y, a, b))
-            cv2.rectangle(opencv_img, (x, y), (x+a, y+b), (0, 255, 0), 2)
-        #  matplotlib expects RGB
-        plt.imshow(cv2.cvtColor(opencv_img, cv2.COLOR_BGR2RGB))
+            # --- EASY OCR PFAD ---
+            import easyocr
+            reader = easyocr.Reader(['en', 'de']) 
+            results = reader.readtext(image_np)
+            for (bbox, txt, prob) in results:
+                if prob > 0.1:
+                    # Umwandlung von 4-Punkt-Polygon zu [x1, y1, x2, y2]
+                    x1, y1 = bbox[0]
+                    x2, y2 = bbox[2]
+                    coord.append([float(x1), float(y1), float(x2), float(y2)])
+                    text.append(txt)
+
+        return (text, coord), False
+
+    except Exception as e:
+        print(f"Kritischer OCR Fehler: {e}")
+        return ([], []), False
+
+    # 4. Box-Formatierung und Visualisierung
+    bb = []
+    if coord: # Nur verarbeiten, wenn Boxen gefunden wurden
+        if display_img:
+            # Visualisierung (optional für Notebooks/Debug)
+            opencv_img = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+            for item in coord:
+                x, y, a, b = get_xywh(item)
+                bb.append((x, y, a, b))
+                cv2.rectangle(opencv_img, (x, y), (x+a, y+b), (0, 255, 0), 2)
+            plt.imshow(cv2.cvtColor(opencv_img, cv2.COLOR_BGR2RGB))
+        else:
+            # Standard-Formatierung für OmniParser
+            if output_bb_format == 'xywh':
+                bb = [get_xywh(item) for item in coord]
+            elif output_bb_format == 'xyxy':
+                bb = [get_xyxy(item) for item in coord]
     else:
-        if output_bb_format == 'xywh':
-            bb = [get_xywh(item) for item in coord]
-        elif output_bb_format == 'xyxy':
-            bb = [get_xyxy(item) for item in coord]
-    return (text, bb), goal_filtering
+        # Falls keine Boxen da sind, bleibt bb eine leere Liste
+        bb = []
+
+    # 5. Finaler Return
+    return (text, bb), is_goal_filtered

@@ -12,7 +12,10 @@ import base64
 from datetime import datetime
 from pathlib import Path
 from typing import cast
-from enum import StrEnum
+try:
+    from enum import StrEnum
+except ImportError:
+    from strenum import StrEnum
 import streamlit as st
 from anthropic import APIResponse
 from anthropic.types import TextBlock

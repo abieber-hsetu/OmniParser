@@ -12,52 +12,91 @@ from io import BytesIO
 
 
 def execute_anything(data):
-    """Execute any command received in the JSON request.
-    WARNING: This function executes commands without any safety checks."""
-    # The 'command' key in the JSON request should contain the command to be executed.
     shell = data.get('shell', False)
-    command = data.get('command', "" if shell else [])
-
-    if isinstance(command, str) and not shell:
-        command = shlex.split(command)
-
-    # Expand user directory
-    for i, arg in enumerate(command):
-        if arg.startswith("~/"):
-            command[i] = os.path.expanduser(arg)
-
-    # Execute the command without any safety checks.
-    try:
-        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=shell, text=True, timeout=120)
-        return jsonify({
-            'status': 'success',
-            'output': result.stdout,
-            'error': result.stderr,
-            'returncode': result.returncode
-        })
-    except Exception as e:
-        logger.error("\n" + traceback.format_exc() + "\n")
-        return jsonify({
-            'status': 'error',
-            'message': str(e)
-        }), 500
+    command = data.get('command', "")
     
+    try:
+        # TRICK: Wenn "start" im Befehl vorkommt, nutzen wir Popen (nicht-blockierend)
+        if isinstance(command, str) and command.startswith("start"):
+            subprocess.Popen(command, shell=True)
+            return jsonify({'status': 'success', 'message': 'Program started in background'})
+        
+        # Normale Befehle (whoami, dir) bleiben synchron für die Rückgabe
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
+                                shell=shell, text=True, timeout=120)
+        return jsonify({'status': 'success', 'output': result.stdout})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+# Klickt den Windows Home Button an   
+# curl -X POST http://localhost:5055/execute      -H "Content-Type: application/json"      -d '{
+#          "action": "mouse_click",
+#          "coordinate": [400, 780]
+#         }'
+# Anschließend Text eintippen
+# curl -X POST http://localhost:5055/execute      -H "Content-Type: application/json"      -d '{
+#          "action": "type_text",
+#          "text": "Hallo Windows!"
+#         }'
 
 def execute(data):
-    """Action space aware implementation. Should not use arbitrary code execution."""
-    return jsonify({
-        'status': 'error',
-        'message': 'Not implemented. Please add your implementation to omnitool/omnibox/vm/win11setup/setupscripts/server/main.py.'
-    }), 500
+    """Implementierung der UI-Steuerung via PyAutoGUI."""
+    try:
+        action = data.get('action')
+        # Wir unterstützen beides: 'coordinate' als Liste oder direkt 'x' und 'y'
+        coords = data.get('coordinate')
+        x = data.get('x') if x is None else data.get('x')
+        y = data.get('y') if y is None else data.get('y')
+        
+        # Falls eine Liste [x, y] kommt, entpacken wir sie
+        if coords and len(coords) == 2:
+            x, y = coords[0], coords[1]
+
+        elif action in ['left_click', 'mouse_click']:
+            if x is not None and y is not None:
+                pyautogui.click(x, y)
+            else:
+                pyautogui.click()
+            return jsonify({'status': 'success', 'message': 'Clicked'})
+
+        elif action == 'double_click':
+            pyautogui.doubleClick(x, y)
+            return jsonify({'status': 'success'})
+
+        elif action == 'right_click':
+            pyautogui.rightClick(x, y)
+            return jsonify({'status': 'success'})
+
+        # --- TASTATUR AKTIONEN ---
+        elif action in ['type', 'type_text']:
+            text = data.get('text', '')
+            pyautogui.write(text, interval=0.05)
+            return jsonify({'status': 'success', 'message': f'Typed text'})
+
+        elif action in ['key', 'key_combination']:
+            keys = data.get('keys', [])
+            # Falls nur eine einzelne Taste als String kommt
+            if isinstance(keys, str):
+                pyautogui.press(keys)
+            else:
+                pyautogui.hotkey(*keys)
+            return jsonify({'status': 'success'})
+
+        # --- FALLBACK ---
+        return jsonify({'status': 'error', 'message': f'Action {action} unknown'}), 400
+
+    except Exception as e:
+        logger.error(f"Fehler in Execute: {str(e)}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-execute_impl = execute   # switch to execute_anything to allow any command. Please use with caution only for testing purposes.
+execute_impl = execute  # switch to execute_anything to allow any command. Please use with caution only for testing purposes.
 
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--log_file", help="log file path", type=str,
                     default=os.path.join(os.path.dirname(__file__), "server.log"))
-parser.add_argument("--port", help="port", type=int, default=5000)
+parser.add_argument("--port", help="port", type=int, default=5050)
 args = parser.parse_args()
 
 logging.basicConfig(filename=args.log_file,level=logging.DEBUG, filemode='w' )
@@ -69,14 +108,23 @@ computer_control_lock = threading.Lock()
 
 @app.route('/probe', methods=['GET'])
 def probe_endpoint():
+    print(">>> Probe-Anfrage erhalten! Sende Antwort...")
     return jsonify({"status": "Probe successful", "message": "Service is operational"}), 200
 
 @app.route('/execute', methods=['POST'])
 def execute_command():
-    # Only execute one command at a time
+    """Dynamischer Verteiler für Shell-Befehle oder UI-Aktionen."""
     with computer_control_lock:
         data = request.json
-        return execute_impl(data)
+        # Wir schauen, welcher Modus im JSON steht. Standard ist 'gui'.
+        mode = data.get('mode', 'gui')
+
+        if mode == 'unsafe' or mode == 'shell':
+            logger.info("Executing Shell Command...")
+            return execute_anything(data)
+        else:
+            logger.info("Executing GUI Action...")
+            return execute(data)
 
 @app.route('/screenshot', methods=['GET'])
 def capture_screen_with_cursor():    
@@ -95,4 +143,4 @@ def capture_screen_with_cursor():
     return send_file(img_io, mimetype='image/png')
 
 if __name__ == '__main__':
-    app.run(host="10.0.2.15", port=args.port)
+    app.run(host="0.0.0.0", port=args.port, debug=True)

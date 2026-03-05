@@ -1,7 +1,6 @@
-$scriptFolder = "\\host.lan\Data"
-$pythonScriptFile = "$scriptFolder\server\main.py"
-$pythonServerPort = 5000
+$scriptFile = "Z:\server\main.py"
+$port = 5050
 
-# Start the flask computer use server
-Write-Host "Running the server on port $pythonServerPort"
-python $pythonScriptFile --port $pythonServerPort
+cd "Z:\"
+Write-Host "Starte OmniBox Agent auf Port $port..."
+python $scriptFile --port $port

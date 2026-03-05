@@ -5,7 +5,10 @@ import asyncio
 import platform
 from collections.abc import Callable
 from datetime import datetime
-from enum import StrEnum
+try:
+    from enum import StrEnum
+except ImportError:
+    from strenum import StrEnum
 from typing import Any, cast
 
 from anthropic import Anthropic, AnthropicBedrock, AnthropicVertex, APIResponse

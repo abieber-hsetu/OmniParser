@@ -10,9 +10,18 @@ import io
 import base64, os
 from util.utils import check_ocr_box, get_yolo_model, get_caption_model_processor, get_som_labeled_img
 import torch
+torch.serialization.add_safe_globals(['ultralytics.nn.tasks.DetectionModel', 'ultralytics.nn.modules.block.C2f', 'ultralytics.nn.modules.conv.Conv', 'ultralytics.nn.modules.head.Detect', 'ultralytics.utils.Iterable'])
 from PIL import Image
 
-yolo_model = get_yolo_model(model_path='weights/icon_detect/model.pt')
+model_path = os.path.join('weights', 'icon_detect_v1_5', 'model_v1_5.pt')
+
+# Kleiner Test beim Start: Existiert die Datei überhaupt?
+if not os.path.exists(model_path):
+    print(f"!!! FEHLER: Die Datei {model_path} wurde nicht gefunden !!!")
+else:
+    print(f"ERFOLG: Modell-Datei unter {model_path} gefunden.")
+
+yolo_model = get_yolo_model(model_path=model_path)
 caption_model_processor = get_caption_model_processor(model_name="florence2", model_name_or_path="weights/icon_caption_florence")
 # caption_model_processor = get_caption_model_processor(model_name="blip2", model_name_or_path="weights/icon_caption_blip2")
 

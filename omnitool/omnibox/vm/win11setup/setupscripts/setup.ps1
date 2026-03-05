@@ -179,92 +179,92 @@ if (Get-Command $chromeAlias -ErrorAction SilentlyContinue) {
 }
 
 # - LibreOffice
-$libreOfficeToolName = "LibreOffice"
-$libreOfficeToolDetails = Get-ToolDetails -toolsList $toolsList -toolName $libreOfficeToolName
+#$libreOfficeToolName = "LibreOffice"
+#$libreOfficeToolDetails = Get-ToolDetails -toolsList $toolsList -toolName $libreOfficeToolName
 
 # Check for LibreOffice installation
-$installedVersion = (Get-WmiObject -Query "SELECT * FROM Win32_Product WHERE Name like 'LibreOffice%'").Version
-if (-not [string]::IsNullOrWhiteSpace($installedVersion)) {
-    Write-Host "LibreOffice $version is already installed."
-} else {
-    Write-Host "LibreOffice is not installed. Downloading and installing LibreOffice..."
-    $libreOfficeInstallerFilePath = "$env:TEMP\libreOffice_installer.exe"
-    
-    $downloadResult = Invoke-DownloadFileFromAvailableMirrors -mirrorUrls $libreOfficeToolDetails.mirrors -outfile $libreOfficeInstallerFilePath
-    if (-not $downloadResult) {
-        Write-Host "Failed to download LibreOffice. Please try again later or install manually."
-    } else {
-        Start-Process "msiexec.exe" -ArgumentList "/i `"$libreOfficeInstallerFilePath`" /quiet" -Wait -NoNewWindow
-        Write-Host "LibreOffice has been installed."
-    
-        # Add LibreOffice to the system PATH environment variable
-        Add-ToEnvPath -NewPath "C:\Program Files\LibreOffice\program"
-    }
-}
+#$installedVersion = (Get-WmiObject -Query "SELECT * FROM Win32_Product WHERE Name like 'LibreOffice%'").Version
+#if (-not [string]::IsNullOrWhiteSpace($installedVersion)) {
+#    Write-Host "LibreOffice $version is already installed."
+#} else {
+#    Write-Host "LibreOffice is not installed. Downloading and installing LibreOffice..."
+#    $libreOfficeInstallerFilePath = "$env:TEMP\libreOffice_installer.exe"
+#    
+#    $downloadResult = Invoke-DownloadFileFromAvailableMirrors -mirrorUrls $libreOfficeToolDetails.mirrors -outfile $libreOfficeInstallerFilePath#
+#    if (-not $downloadResult) {
+#        Write-Host "Failed to download LibreOffice. Please try again later or install manually."
+#    } else {
+#        Start-Process "msiexec.exe" -ArgumentList "/i `"$libreOfficeInstallerFilePath`" /quiet" -Wait -NoNewWindow
+#        Write-Host "LibreOffice has been installed."
+#    
+#        # Add LibreOffice to the system PATH environment variable
+#        Add-ToEnvPath -NewPath "C:\Program Files\LibreOffice\program"
+#    }
+#}
 
 # - VLC
-$vlcToolName = "VLC"
-$vlcToolDetails = Get-ToolDetails -toolsList $toolsList -toolName $vlcToolName
-$vlcAlias = $vlcToolDetails.alias
-$vlcExecutableFilePath = "C:\Program Files\VideoLAN\VLC\vlc.exe"
+#$vlcToolName = "VLC"
+#$vlcToolDetails = Get-ToolDetails -toolsList $toolsList -toolName $vlcToolName
+#$vlcAlias = $vlcToolDetails.alias
+#$vlcExecutableFilePath = "C:\Program Files\VideoLAN\VLC\vlc.exe"
 
 # Check if VLC is already installed by checking the VLC command
-if (Test-Path $vlcExecutableFilePath) {
-    Write-Host "VLC is already installed."
-} else {
+#if (Test-Path $vlcExecutableFilePath) {
+#    Write-Host "VLC is already installed."
+#} else {
     # Download the installer to the Temp directory
-    $vlcInstallerFilePath = "$env:TEMP\vlc_installer.exe"
-    $downloadResult = Invoke-DownloadFileFromAvailableMirrors -mirrorUrls $vlcToolDetails.mirrors -outfile $vlcInstallerFilePath
-    if (-not $downloadResult) {
-        Write-Host "Failed to download VLC. Please try again later or install manually."
-    } else {
-        # Execute the installer silently with elevated permissions
-        Start-Process -FilePath $vlcInstallerFilePath -ArgumentList "/S" -Verb RunAs -Wait
+#    $vlcInstallerFilePath = "$env:TEMP\vlc_installer.exe"
+#    $downloadResult = Invoke-DownloadFileFromAvailableMirrors -mirrorUrls $vlcToolDetails.mirrors -outfile $vlcInstallerFilePath
+#    if (-not $downloadResult) {
+#        Write-Host "Failed to download VLC. Please try again later or install manually."
+#    } else {
+#        # Execute the installer silently with elevated permissions
+#        Start-Process -FilePath $vlcInstallerFilePath -ArgumentList "/S" -Verb RunAs -Wait
 
         # Remove the installer file after installation
-        Remove-Item -Path $vlcInstallerFilePath
+#        Remove-Item -Path $vlcInstallerFilePath
 
         # Set alias
-        $setAliasExpression = "Set-Alias -Name $vlcAlias -Value `"$vlcExecutableFilePath`""
-        Add-Content -Path $PROFILE -Value $setAliasExpression
-        Invoke-Expression $setAliasExpression
+#        $setAliasExpression = "Set-Alias -Name $vlcAlias -Value `"$vlcExecutableFilePath`""
+#        Add-Content -Path $PROFILE -Value $setAliasExpression
+#        Invoke-Expression $setAliasExpression
 
         # Add VLC to the system PATH environment variable
-        Add-ToEnvPath -NewPath "C:\Program Files\VideoLAN\VLC"
-    }
-}
+#        Add-ToEnvPath -NewPath "C:\Program Files\VideoLAN\VLC"
+#    }
+#}
 
 # - GIMP
-$gimpToolName = "GIMP"
-$gimpToolDetails = Get-ToolDetails -toolsList $toolsList -toolName $gimpToolName
-$gimpAlias = $gimpToolDetails.alias
-$gimpExecutablePath = "C:\Program Files\GIMP 2\bin\gimp-2.10.exe"
+#$gimpToolName = "GIMP"
+#$gimpToolDetails = Get-ToolDetails -toolsList $toolsList -toolName $gimpToolName
+#$gimpAlias = $gimpToolDetails.alias
+#$gimpExecutablePath = "C:\Program Files\GIMP 2\bin\gimp-2.10.exe"
 
 # Check if GIMP is already installed by checking the GIMP executable path
-if (Test-Path $gimpExecutablePath) {
-    Write-Host "GIMP is already installed."
-} else {
+#if (Test-Path $gimpExecutablePath) {
+#    Write-Host "GIMP is already installed."
+#} else {
     # Download the installer to the Temp directory
-    $gimpInstallerFilePath = "$env:TEMP\gimp_installer.exe"
-    $downloadResult = Invoke-DownloadFileFromAvailableMirrors -mirrorUrls $gimpToolDetails.mirrors -outfile $gimpInstallerFilePath
-    if (-not $downloadResult) {
-        Write-Host "Failed to download GIMP. Please try again later or install manually."
-    } else {
-        # Execute the installer silently with elevated permissions
-        Start-Process -FilePath $gimpInstallerFilePath -ArgumentList "/VERYSILENT /ALLUSERS" -Verb RunAs -Wait
+#    $gimpInstallerFilePath = "$env:TEMP\gimp_installer.exe"
+#    $downloadResult = Invoke-DownloadFileFromAvailableMirrors -mirrorUrls $gimpToolDetails.mirrors -outfile $gimpInstallerFilePath
+#    if (-not $downloadResult) {
+#        Write-Host "Failed to download GIMP. Please try again later or install manually."
+#    } else {
+#        # Execute the installer silently with elevated permissions
+#        Start-Process -FilePath $gimpInstallerFilePath -ArgumentList "/VERYSILENT /ALLUSERS" -Verb RunAs -Wait
 
         # Remove the installer file after installation
-        Remove-Item -Path $gimpInstallerFilePath
+#        Remove-Item -Path $gimpInstallerFilePath
 
         # Set alias
-        $setAliasExpression = "Set-Alias -Name $gimpAlias -Value `"$gimpExecutablePath`""
-        Add-Content -Path $PROFILE -Value $setAliasExpression
-        Invoke-Expression $setAliasExpression
+ #       $setAliasExpression = "Set-Alias -Name $gimpAlias -Value `"$gimpExecutablePath`""
+#        Add-Content -Path $PROFILE -Value $setAliasExpression
+#        Invoke-Expression $setAliasExpression
 
         # Add GIMP to the system PATH environment variable
-        Add-ToEnvPath -NewPath "C:\Program Files\GIMP 2\bin"
-    }
-}
+#        Add-ToEnvPath -NewPath "C:\Program Files\GIMP 2\bin"
+#    }
+#}
 
 # - VS Code
 $vsCodeToolName = "VS Code"
@@ -318,36 +318,36 @@ if (Test-Path $vsCodeExecutablePath) {
 }
 
 # - Thunderbird
-$thunderbirdToolName = "Thunderbird"
-$thunderbirdToolDetails = Get-ToolDetails -toolsList $toolsList -toolName $thunderbirdToolName
-$thunderbirdAlias = $thunderbirdToolDetails.alias
-$thunderbirdExecutablePath = "C:\Program Files\Mozilla Thunderbird\thunderbird.exe"
+#$thunderbirdToolName = "Thunderbird"
+#$thunderbirdToolDetails = Get-ToolDetails -toolsList $toolsList -toolName $thunderbirdToolName
+#$thunderbirdAlias = $thunderbirdToolDetails.alias
+#$thunderbirdExecutablePath = "C:\Program Files\Mozilla Thunderbird\thunderbird.exe"
 
 # Check if Thunderbird is already installed by checking the Thunderbird executable path
-if (Test-Path $thunderbirdExecutablePath) {
-    Write-Host "Thunderbird is already installed."
-} else {
-    # Download the installer to the Temp directory
-    $thunderbirdInstallerFilePath = "$env:TEMP\ThunderbirdSetup.exe"
-    $downloadResult = Invoke-DownloadFileFromAvailableMirrors -mirrorUrls $thunderbirdToolDetails.mirrors -outfile $thunderbirdInstallerFilePath
-    if (-not $downloadResult) {
-        Write-Host "Failed to download Thunderbird. Please try again later or install manually."
-    } else {
-        # Execute the installer silently with elevated permissions
-        Start-Process -FilePath $thunderbirdInstallerFilePath -ArgumentList "/S" -Verb RunAs -Wait
+#if (Test-Path $thunderbirdExecutablePath) {
+#    Write-Host "Thunderbird is already installed."
+#} else {
+#    # Download the installer to the Temp directory
+#    $thunderbirdInstallerFilePath = "$env:TEMP\ThunderbirdSetup.exe"
+#    $downloadResult = Invoke-DownloadFileFromAvailableMirrors -mirrorUrls $thunderbirdToolDetails.mirrors -outfile $thunderbirdInstallerFilePath
+#    if (-not $downloadResult) {
+#        Write-Host "Failed to download Thunderbird. Please try again later or install manually."
+#    } else {
+#        # Execute the installer silently with elevated permissions
+#        Start-Process -FilePath $thunderbirdInstallerFilePath -ArgumentList "/S" -Verb RunAs -Wait#
 
         # Remove the installer file after installation
-        Remove-Item -Path $thunderbirdInstallerFilePath
+#        Remove-Item -Path $thunderbirdInstallerFilePath
 
         # Set alias
-        $setAliasExpression = "Set-Alias -Name $thunderbirdAlias -Value `"$thunderbirdExecutablePath`""
-        Add-Content -Path $PROFILE -Value $setAliasExpression
-        Invoke-Expression $setAliasExpression
-
-        # Add Thunderbird to the system PATH environment variable
-        Add-ToEnvPath -NewPath "C:\Program Files\Mozilla Thunderbird"
-    }
-}
+#       $setAliasExpression = "Set-Alias -Name $thunderbirdAlias -Value `"$thunderbirdExecutablePath`""
+#        Add-Content -Path $PROFILE -Value $setAliasExpression
+#        Invoke-Expression $setAliasExpression
+#
+#        # Add Thunderbird to the system PATH environment variable
+#        Add-ToEnvPath -NewPath "C:\Program Files\Mozilla Thunderbird"
+#    }
+#}
 
 # - Server Setup 
 

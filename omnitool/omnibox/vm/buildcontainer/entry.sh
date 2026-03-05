@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 : "${BOOT_MODE:="windows"}"
 
-APP="OmniParser Windows"
+APP="OmniParser"
 SUPPORT="https://github.com/microsoft/OmniParser"
 
 cd /run
@@ -21,6 +21,14 @@ cd /run
 . config.sh     # Configure arguments
 
 trap - ERR
+
+if [ -d "/usr/share/novnc" ]; then
+    info "Starting noVNC web interface on port 8007..."
+    # Wir verbinden den Web-Port 8007 mit dem VNC-Port 5900 von QEMU
+    websockify --web /usr/share/novnc/ 8007 localhost:5900 >/dev/null 2>&1 &
+else
+    warn "noVNC directory not found, web interface will be disabled."
+fi
 
 version=$(qemu-system-x86_64 --version | head -n 1 | cut -d '(' -f 1 | awk '{ print $NF }')
 info "Booting ${APP}${BOOT_DESC} using QEMU v$version..."

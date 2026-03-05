@@ -10,7 +10,10 @@ import io
 import shutil
 import mimetypes
 from datetime import datetime
-from enum import StrEnum
+try:
+    from enum import StrEnum
+except ImportError:
+    from strenum import StrEnum
 from functools import partial
 from pathlib import Path
 from typing import cast, List, Optional

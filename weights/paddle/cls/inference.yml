@@ -1,0 +1,21 @@
+Global:
+  model_name: ch_ppocr_mobile_v2.0_cls_infer
+  model_type: cls
+  algorithm: CLS
+
+PreProcess:
+  transform_ops:
+    - DecodeImage:
+        img_mode: BGR
+        channel_first: false
+    - ClsResizeImg:
+        image_shape: [3, 48, 192]
+    - NormalizeImage:
+        scale: 0.00392156862745098
+        mean: [0.5, 0.5, 0.5]
+        std: [0.5, 0.5, 0.5]
+        order: hwc
+    - ToCHWImage: null
+
+PostProcess:
+  name: ClsPostProcess

@@ -65,8 +65,21 @@ class VLMAgent:
         self.total_cost = 0
         self.step_count = 0
 
-        self.system = ''
-           
+        self.system = """You are a precise and methodical AI agent controlling a Windows computer. Your task is to accurately identify UI elements and execute actions reliably.
+
+        To avoid errors, strictly follow these rules:
+
+        1. Verify Box IDs (No Guessing): Before selecting a Box ID for an action, visually analyze its position on the screenshot. Does the box logically belong to the element you want to interact with? (e.g., The taskbar is always at the bottom of the screen. The 'X' to close a window is always in the top-right corner). State your reasoning clearly before acting.
+
+        2. The 'Click & Enter' Rule for Icons: NEVER use the 'double_click' command for desktop icons. Automated double-clicks often fail due to OS focus issues. To open a program, always use this two-step process:
+        * Step 1: Use a single 'click' (left click) on the icon's Box ID to select/highlight it.
+        * Step 2: Use a keyboard action to press the 'Enter' (or 'Return') key. This opens the program 100% reliably.
+
+        3. Deliberate Actions: If you are unsure where an element is, do not blindly click on empty boxes. Re-analyze the screen.
+
+        4. Success Control: If you executed an action and the next screenshot looks identical, do not blindly repeat the exact same command on the same Box ID. Consider if the action failed (wrong Box ID?) or if the system is just loading, and adapt your strategy.
+        5. If you are stuck with a solution, think of an alternative way, e.g. instead of clicking on a shortcut use the Windows search bar to open the program, or vice versa. If you are trying to click on something but it doesn't work, try to scroll down/up to see if there is a similar element that can be clicked."""
+                
     def __call__(self, messages: list, parsed_screen: list[str, list, dict]):
         self.step_count += 1
         image_base64 = parsed_screen['original_screenshot_base64']
@@ -101,6 +114,12 @@ class VLMAgent:
                 provider_base_url="https://api.openai.com/v1",
                 temperature=0,
             )
+            try:
+                token_usage = int(token_usage)
+            except (ValueError, TypeError):
+                # Falls mal kein Text zurückkommt, setzen wir es auf 0
+                token_usage = 0
+
             print(f"oai token usage: {token_usage}")
             self.total_token_usage += token_usage
             if 'gpt' in self.model:
@@ -169,7 +188,7 @@ class VLMAgent:
         self.output_callback(f'<img src="data:image/png;base64,{img_to_show_base64}">', sender="bot")
         self.output_callback(
                     f'<details>'
-                    f'  <summary>Parsed Screen elemetns by OmniParser</summary>'
+                    f'  <summary>Parsed Screen elements by OmniParser</summary>'
                     f'  <pre>{screen_info}</pre>'
                     f'</details>',
                     sender="bot"

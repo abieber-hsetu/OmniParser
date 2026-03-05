@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+: "${STORAGE:=/storage}"
+
 set -Eeuo pipefail
 
 TMP="$STORAGE/tmp"
@@ -6,6 +8,7 @@ DIR="$TMP/unpack"
 FB="falling back to manual installation!"
 ETFS="boot/etfsboot.com"
 EFISYS="efi/microsoft/boot/efisys_noprompt.bin"
+
 
 skipInstall() {
 
