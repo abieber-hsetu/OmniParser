@@ -4,6 +4,7 @@ try:
     from enum import StrEnum
 except ImportError:
     from strenum import StrEnum
+
 from typing import Literal, TypedDict
 
 from PIL import Image

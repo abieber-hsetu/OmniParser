@@ -9,6 +9,7 @@ try:
     from enum import StrEnum
 except ImportError:
     from strenum import StrEnum
+
 from typing import Any, cast
 
 from anthropic import Anthropic, AnthropicBedrock, AnthropicVertex, APIResponse

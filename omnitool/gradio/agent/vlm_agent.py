@@ -17,6 +17,7 @@ import time
 import re
 
 OUTPUT_DIR = "./tmp/outputs"
+prompt_file = "system_prompt.txt"
 
 def extract_data(input_string, data_type):
     # Regular expression to extract content starting from '```python' until the end if there are no closing backticks
@@ -65,20 +66,15 @@ class VLMAgent:
         self.total_cost = 0
         self.step_count = 0
 
-        self.system = """You are a precise and methodical AI agent controlling a Windows computer. Your task is to accurately identify UI elements and execute actions reliably.
-
-        To avoid errors, strictly follow these rules:
-
-        1. Verify Box IDs (No Guessing): Before selecting a Box ID for an action, visually analyze its position on the screenshot. Does the box logically belong to the element you want to interact with? (e.g., The taskbar is always at the bottom of the screen. The 'X' to close a window is always in the top-right corner). State your reasoning clearly before acting.
-
-        2. The 'Click & Enter' Rule for Icons: NEVER use the 'double_click' command for desktop icons. Automated double-clicks often fail due to OS focus issues. To open a program, always use this two-step process:
-        * Step 1: Use a single 'click' (left click) on the icon's Box ID to select/highlight it.
-        * Step 2: Use a keyboard action to press the 'Enter' (or 'Return') key. This opens the program 100% reliably.
-
-        3. Deliberate Actions: If you are unsure where an element is, do not blindly click on empty boxes. Re-analyze the screen.
-
-        4. Success Control: If you executed an action and the next screenshot looks identical, do not blindly repeat the exact same command on the same Box ID. Consider if the action failed (wrong Box ID?) or if the system is just loading, and adapt your strategy.
-        5. If you are stuck with a solution, think of an alternative way, e.g. instead of clicking on a shortcut use the Windows search bar to open the program, or vice versa. If you are trying to click on something but it doesn't work, try to scroll down/up to see if there is a similar element that can be clicked."""
+        try:
+            with open(prompt_file, "r", encoding="utf-8") as f:
+                self.system = f.read()
+            print(f"✅ System-Prompt erfolgreich aus {prompt_file} geladen.")
+        except FileNotFoundError:
+            # Fallback: Falls die Datei fehlt, wird eine Warnung ausgegeben 
+            # und ein minimaler Standard-Prompt gesetzt
+            print(f"⚠️ WARNUNG: {prompt_file} nicht gefunden! Nutze Standard-Prompt.")
+            self.system = "You are a precise AI agent controlling a Windows computer."
                 
     def __call__(self, messages: list, parsed_screen: list[str, list, dict]):
         self.step_count += 1
@@ -112,7 +108,7 @@ class VLMAgent:
                 api_key=self.api_key,
                 max_tokens=self.max_tokens,
                 provider_base_url="https://api.openai.com/v1",
-                temperature=0,
+                temperature=0.2,
             )
             try:
                 token_usage = int(token_usage)

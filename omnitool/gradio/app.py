@@ -8,7 +8,6 @@ try:
     from enum import StrEnum
 except ImportError:
     from strenum import StrEnum
-
 from functools import partial
 from pathlib import Path
 from typing import cast

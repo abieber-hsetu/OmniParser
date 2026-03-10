@@ -103,13 +103,32 @@ class VLMOrchestratedAgent:
         self.step_count = 0
         self.plan, self.ledger = None, None
 
-        self.system = ''
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        prompt_file = os.path.join(current_dir, "system_prompt.txt")
+
+        try:
+            with open(prompt_file, "r", encoding="utf-8") as f:
+                self.system = f.read()
+            print(f"✅ System-Prompt erfolgreich aus {prompt_file} geladen.")
+        except FileNotFoundError:
+            # Fallback: Falls die Datei fehlt, wird eine Warnung ausgegeben 
+            # und ein minimaler Standard-Prompt gesetzt
+            print(f"⚠️ WARNUNG: {prompt_file} nicht gefunden! Nutze Standard-Prompt.")
+            self.system = "You are a precise AI agent controlling a Windows computer."
     
-    def __call__(self, messages: list, parsed_screen: list[str, list, dict]):
+    def __call__(self, messages: list, parsed_screen: dict):
+        import re
+        import json
+        import base64
+        import time
+        import uuid
+        from io import BytesIO
+        from PIL import Image, ImageDraw
+
+        # 1. Schrittzähler und Fortschritts-Ledger initialisieren/aktualisieren
         if self.step_count == 0:
             plan = self._initialize_task(messages)
             self.output_callback(f'-- Plan: {plan} --', )
-            # update messages with the plan
             messages.append({"role": "assistant", "content": plan})
         else:
             updated_ledger = self._update_ledger(messages)
@@ -121,36 +140,40 @@ class VLMOrchestratedAgent:
                 f'  </div>'
                 f'</details>',
             )
-            # update messages with the ledger
             messages.append({"role": "assistant", "content": updated_ledger})
             self.ledger = updated_ledger
 
         self.step_count += 1
-        # save the image to the output folder
+        
+        # 2. Screenshots für das Debugging lokal speichern
         with open(f"{self.save_folder}/screenshot_{self.step_count}.png", "wb") as f:
             f.write(base64.b64decode(parsed_screen['original_screenshot_base64']))
         with open(f"{self.save_folder}/som_screenshot_{self.step_count}.png", "wb") as f:
             f.write(base64.b64decode(parsed_screen['som_image_base64']))
 
+        # 3. Metadaten vom OmniParser extrahieren
         latency_omniparser = parsed_screen['latency']
-        screen_info = str(parsed_screen['screen_info'])
         screenshot_uuid = parsed_screen['screenshot_uuid']
         screen_width, screen_height = parsed_screen['width'], parsed_screen['height']
 
-        boxids_and_labels = parsed_screen["screen_info"]
-        system = self._get_system_prompt(boxids_and_labels)
+        # --- KORREKTUR: Wir nutzen die synchronisierte screen_info vom Server ---
+        sync_screen_info_str = parsed_screen.get("screen_info", "")
+        system = self._get_system_prompt(sync_screen_info_str)
+        content_list = parsed_screen.get("boxes", {})
+        # ----------------------------------------------------------------------
 
-        # drop looping actions msg, byte image etc
         planner_messages = messages
         _remove_som_images(planner_messages)
         _maybe_filter_to_n_most_recent_images(planner_messages, self.only_n_most_recent_images)
 
+        # Bilder an die letzte Nachricht anhängen (für das VLM)
         if isinstance(planner_messages[-1], dict):
             if not isinstance(planner_messages[-1]["content"], list):
                 planner_messages[-1]["content"] = [planner_messages[-1]["content"]]
             planner_messages[-1]["content"].append(f"{OUTPUT_DIR}/screenshot_{screenshot_uuid}.png")
             planner_messages[-1]["content"].append(f"{OUTPUT_DIR}/screenshot_som_{screenshot_uuid}.png")
 
+        # 4. VLM Aufruf mit bereinigten Provider-URLs
         start = time.time()
         if "gpt" in self.model or "o1" in self.model or "o3-mini" in self.model:
             vlm_response, token_usage = run_oai_interleaved(
@@ -160,16 +183,8 @@ class VLMOrchestratedAgent:
                 api_key=self.api_key,
                 max_tokens=self.max_tokens,
                 provider_base_url="https://api.openai.com/v1",
-                temperature=0,
+                temperature=0.2,
             )
-            print(f"oai token usage: {token_usage}")
-            self.total_token_usage += token_usage
-            if 'gpt' in self.model:
-                self.total_cost += (token_usage * 2.5 / 1000000)  # https://openai.com/api/pricing/
-            elif 'o1' in self.model:
-                self.total_cost += (token_usage * 15 / 1000000)  # https://openai.com/api/pricing/
-            elif 'o3-mini' in self.model:
-                self.total_cost += (token_usage * 1.1 / 1000000)  # https://openai.com/api/pricing/
         elif "r1" in self.model:
             vlm_response, token_usage = run_groq_interleaved(
                 messages=planner_messages,
@@ -178,9 +193,6 @@ class VLMOrchestratedAgent:
                 api_key=self.api_key,
                 max_tokens=self.max_tokens,
             )
-            print(f"groq token usage: {token_usage}")
-            self.total_token_usage += token_usage
-            self.total_cost += (token_usage * 0.99 / 1000000)
         elif "qwen" in self.model:
             vlm_response, token_usage = run_oai_interleaved(
                 messages=planner_messages,
@@ -191,98 +203,91 @@ class VLMOrchestratedAgent:
                 provider_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
                 temperature=0,
             )
-            print(f"qwen token usage: {token_usage}")
-            self.total_token_usage += token_usage
-            self.total_cost += (token_usage * 2.2 / 1000000)  # https://help.aliyun.com/zh/model-studio/getting-started/models?spm=a2c4g.11186623.0.0.74b04823CGnPv7#fe96cfb1a422a
-        else:
-            raise ValueError(f"Model {self.model} not supported")
-        latency_vlm = time.time() - start
         
-        # Update step counter with both latencies
+        latency_vlm = time.time() - start
         self.output_callback(f'<i>Step {self.step_count} | OmniParser: {latency_omniparser:.2f}s | LLM: {latency_vlm:.2f}s</i>', )
 
-        print(f"{vlm_response}")
-        
-        if self.print_usage:
-            print(f"Total token so far: {self.total_token_usage}. Total cost so far: $USD{self.total_cost:.5f}")
-        
-        vlm_response_json = extract_data(vlm_response, "json")
-        vlm_response_json = json.loads(vlm_response_json)
+        # 5. Robustes JSON-Parsing der KI-Antwort
+        try:
+            json_match = re.search(r'(\{.*\})', vlm_response, re.DOTALL)
+            clean_json = json_match.group(1) if json_match else vlm_response
+            vlm_response_json = json.loads(clean_json)
+        except Exception:
+            vlm_response_json = {"Reasoning": "JSON Formatfehler", "Next Action": "wait", "Box ID": None}
 
+        # 6. Koordinatenberechnung und Visualisierung (Roter Punkt)
         img_to_show_base64 = parsed_screen["som_image_base64"]
-        if "Box ID" in vlm_response_json:
-            try:
-                bbox = parsed_screen["parsed_content_list"][int(vlm_response_json["Box ID"])]["bbox"]
-                vlm_response_json["box_centroid_coordinate"] = [int((bbox[0] + bbox[2]) / 2 * screen_width), int((bbox[1] + bbox[3]) / 2 * screen_height)]
-                img_to_show_data = base64.b64decode(img_to_show_base64)
-                img_to_show = Image.open(BytesIO(img_to_show_data))
-
-                draw = ImageDraw.Draw(img_to_show)
-                x, y = vlm_response_json["box_centroid_coordinate"] 
-                radius = 10
-                draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill='red')
-                draw.ellipse((x - radius*3, y - radius*3, x + radius*3, y + radius*3), fill=None, outline='red', width=2)
-
-                buffered = BytesIO()
-                img_to_show.save(buffered, format="PNG")
-                img_to_show_base64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
-            except:
-                print(f"Error parsing: {vlm_response_json}")
-                pass
-        self.output_callback(f'<img src="data:image/png;base64,{img_to_show_base64}">', )
         
-        # Display screen info in a collapsible dropdown
+        if "Box ID" in vlm_response_json and vlm_response_json["Box ID"] is not None:
+            try:
+                target_id = int(vlm_response_json["Box ID"])
+                # Da wir die Liste im Server mit enumerate() gebaut haben, passt der Index 1:1
+                if target_id < len(content_list):
+                    target_item = content_list[target_id]
+                    # Sicherstellen, dass wir BBox-Daten haben (Mapping-Schutz)
+                    if isinstance(target_item, dict) and "bbox" in target_item:
+                        bbox = content_list[target_id]["bbox"]
+                        vlm_response_json["box_centroid_coordinate"] = [
+                            int((bbox[0] + bbox[2]) / 2 * screen_width), 
+                            int((bbox[1] + bbox[3]) / 2 * screen_height)
+                        ]
+                        
+                        # Zeichne einen roten Punkt zur Kontrolle in Gradio
+                        img_to_show_data = base64.b64decode(img_to_show_base64)
+                        img_to_show = Image.open(BytesIO(img_to_show_data))
+                        draw = ImageDraw.Draw(img_to_show)
+                        x, y = vlm_response_json["box_centroid_coordinate"] 
+                        draw.ellipse((x - 10, y - 10, x + 10, y + 10), fill='red', outline='white', width=2)
+                        
+                        buffered = BytesIO()
+                        img_to_show.save(buffered, format="PNG")
+                        img_to_show_base64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+            except Exception as e:
+                print(f"Mapping/Visualisierungs-Fehler: {e}")
+
+        # 7. UI Output für Gradio
+        self.output_callback(f'<img src="data:image/png;base64,{img_to_show_base64}">', )
         self.output_callback(
             f'<details>'
-            f'  <summary><strong>Parsed Screen Elements (click to expand)</strong></summary>'
+            f'  <summary><strong>Parsed Screen Elements (Synced from Server)</strong></summary>'
             f'  <div style="padding: 10px; background-color: #f8f9fa; border-radius: 5px; margin-top: 5px;">'
-            f'    <pre>{screen_info}</pre>'
+            f'    <pre>{sync_screen_info_str}</pre>'
             f'  </div>'
             f'</details>',
         )
         
-        vlm_plan_str = ""
-        for key, value in vlm_response_json.items():
-            if key == "Reasoning":
-                vlm_plan_str += f'{value}'
-            else:
-                vlm_plan_str += f'\n{key}: {value}'
-
-        # construct the response so that anthropicExcutor can execute the tool
+        # 8. Tool-Antwort-Objekte für den Executor zusammenstellen
+        vlm_plan_str = f"Reasoning: {vlm_response_json.get('Reasoning', '')}"
         response_content = [BetaTextBlock(text=vlm_plan_str, type='text')]
-        if 'box_centroid_coordinate' in vlm_response_json:
-            move_cursor_block = BetaToolUseBlock(id=f'toolu_{uuid.uuid4()}',
-                                            input={'action': 'mouse_move', 'coordinate': vlm_response_json["box_centroid_coordinate"]},
-                                            name='computer', type='tool_use')
-            response_content.append(move_cursor_block)
+        
+        next_action = vlm_response_json.get("Next Action", "None")
+        if 'box_centroid_coordinate' in vlm_response_json and next_action != "wait":
+            response_content.append(BetaToolUseBlock(
+                id=f'toolu_{uuid.uuid4()}',
+                input={'action': 'mouse_move', 'coordinate': vlm_response_json["box_centroid_coordinate"]},
+                name='computer', type='tool_use'))
 
-        if vlm_response_json["Next Action"] == "None":
-            print("Task paused/completed.")
-        elif vlm_response_json["Next Action"] == "type":
-            sim_content_block = BetaToolUseBlock(id=f'toolu_{uuid.uuid4()}',
-                                        input={'action': vlm_response_json["Next Action"], 'text': vlm_response_json["value"]},
-                                        name='computer', type='tool_use')
-            response_content.append(sim_content_block)
-        else:
-            sim_content_block = BetaToolUseBlock(id=f'toolu_{uuid.uuid4()}',
-                                            input={'action': vlm_response_json["Next Action"]},
-                                            name='computer', type='tool_use')
-            response_content.append(sim_content_block)
-        response_message = BetaMessage(id=f'toolu_{uuid.uuid4()}', content=response_content, model='', role='assistant', type='message', stop_reason='tool_use', usage=BetaUsage(input_tokens=0, output_tokens=0))
+        if next_action == "type":
+            response_content.append(BetaToolUseBlock(
+                id=f'toolu_{uuid.uuid4()}',
+                input={'action': 'type', 'text': vlm_response_json.get("value", "")},
+                name='computer', type='tool_use'))
+        elif next_action not in ["None", "wait", "mouse_move"]:
+            response_content.append(BetaToolUseBlock(
+                id=f'toolu_{uuid.uuid4()}',
+                input={'action': next_action},
+                name='computer', type='tool_use'))
 
-        # save the intermediate step trajectory to the save folder
-        step_trajectory = {
-            "screenshot_path": f"{self.save_folder}/screenshot_{self.step_count}.png",
-            "som_screenshot_path": f"{self.save_folder}/som_screenshot_{self.step_count}.png",
-            "screen_info": screen_info,
-            "latency_omniparser": latency_omniparser,
-            "latency_vlm": latency_vlm,
-            "vlm_response_json": vlm_response_json,
-            'ledger': self.ledger,
-        }
-        with open(f"{self.save_folder}/trajectory.json", "a") as f:
-            f.write(json.dumps(step_trajectory))
-            f.write("\n")
+        # 9. Finales BetaMessage Objekt mit allen Pflichtfeldern erstellen
+        response_message = BetaMessage(
+            id=f'msg_{uuid.uuid4()}', 
+            content=response_content, 
+            model=self.model,
+            role='assistant', 
+            type='message',
+            stop_reason='tool_use',
+            usage=BetaUsage(input_tokens=0, output_tokens=0)
+        )
 
         return response_message, vlm_response_json
 

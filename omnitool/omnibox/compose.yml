@@ -6,8 +6,8 @@ services:
     environment:
       VERSION: "11"
       RAM_SIZE: "8G"
-      CPU_CORES: "4"
-      DISK_SIZE: "20G"
+      CPU_CORES: "6"
+      DISK_SIZE: "50G" # vor dem Erhöhen schauen ob noch genug Speicher frei ist
       KVM: "Y"
       CPU_MODEL: "host"
       NET_TYPE: "none"

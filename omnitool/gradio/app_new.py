@@ -6,6 +6,34 @@ python app_new.py --windows_host_url localhost:8006 --omniparser_server_url loca
 """
 
 import os
+# Function to define the tmp-path of gradio
+def setup_gradio_temp():
+    system_tmp = "/tmp/gradio"
+    local_tmp = "./.gradio_tmp"
+    
+    try:
+        # 1. Versuch: Teste, ob wir im System-Ordner schreiben dürfen
+        # Wir versuchen, den Ordner zu erstellen oder eine Testdatei anzulegen
+        os.makedirs(system_tmp, exist_ok=True)
+        test_file = os.path.join(system_tmp, ".permissions_test")
+        with open(test_file, "w") as f:
+            f.write("test")
+        os.remove(test_file)
+        
+        print(f"✅ System-Temp ({system_tmp}) ist bereit.")
+        # Wenn alles okay ist, lassen wir alles beim Alten
+        
+    except (PermissionError, OSError):
+        # 2. Fallback: Wenn der Zugriff verweigert wird
+        print(f"⚠️ Zugriff auf {system_tmp} verweigert. Nutze lokalen Fallback: {local_tmp}")
+        
+        # Lokalen Ordner erstellen
+        Path(local_tmp).mkdir(parents=True, exist_ok=True)
+        
+        # Gradio über die Umgebungsvariable umleiten
+        os.environ["GRADIO_TEMP_DIR"] = os.path.abspath(local_tmp)
+
+setup_gradio_temp()
 import io
 import shutil
 import mimetypes
@@ -14,6 +42,7 @@ try:
     from enum import StrEnum
 except ImportError:
     from strenum import StrEnum
+    
 from functools import partial
 from pathlib import Path
 from typing import cast, List, Optional
@@ -31,6 +60,14 @@ from tools import ToolResult
 import requests
 from requests.exceptions import RequestException
 import base64
+import subprocess
+from dotenv import load_dotenv
+from rag_manager import HsetuRagManager
+import gc
+
+load_dotenv
+
+rag_manager = HsetuRagManager()
 
 CONFIG_DIR = Path("~/.anthropic").expanduser()
 API_KEY_FILE = CONFIG_DIR / "api_key"
@@ -44,10 +81,18 @@ INTRO_TEXT = '''
 </div>
 '''
 
+def get_host_ip():
+    try:
+        return subprocess.check_output(['hostname', '-I']).decode('utf-8').split()[0]
+    except:
+        return "127.0.0.1"
+
 def parse_arguments():
+    host_ip = get_host_ip()
     parser = argparse.ArgumentParser(description="Gradio App")
-    parser.add_argument("--windows_host_url", type=str, default='localhost:8006')
+    parser.add_argument("--windows_host_url", type=str, default=f"{host_ip}:8006")
     parser.add_argument("--omniparser_server_url", type=str, default="localhost:8000")
+    parser.add_argument("--windows_agent_port", type=int, default=5055)
     parser.add_argument("--run_folder", type=str, default="./tmp/outputs")
     return parser.parse_args()
 args = parse_arguments()
@@ -155,6 +200,8 @@ def _tool_output_callback(tool_output: ToolResult, tool_id: str, tool_state: dic
     tool_state[tool_id] = tool_output
 
 def chatbot_output_callback(message, chatbot_state, hide_images=False, sender="bot"):
+    if message is None:
+        return
     def _render_message(message: str | BetaTextBlock | BetaToolUseBlock | ToolResult, hide_images=False):
     
         print(f"_render_message: {str(message)[:100]}")
@@ -212,10 +259,11 @@ def chatbot_output_callback(message, chatbot_state, hide_images=False, sender="b
     # processing Anthropic messages
     message = _render_message(message, hide_images)
     
+    # Das ist die wichtige Änderung für Gradio 5:
     if sender == "bot":
-        chatbot_state.append((None, message))
+        chatbot_state.append({"role": "assistant", "content": message})
     else:
-        chatbot_state.append((message, None))
+        chatbot_state.append({"role": "user", "content": message})
     
     # Create a concise version of the chatbot state for printing
     concise_state = [(_truncate_string(user_msg), _truncate_string(bot_msg))
@@ -223,51 +271,91 @@ def chatbot_output_callback(message, chatbot_state, hide_images=False, sender="b
     # print(f"chatbot_output_callback chatbot_state: {concise_state} (truncated)")
 
 def valid_params(user_input, state):
-    """Validate all requirements and return a list of error messages."""
     errors = []
     
-    for server_name, url in [('Windows Host', 'localhost:5000'), ('OmniParser Server', args.omniparser_server_url)]:
-        try:
-            url = f'http://{url}/probe'
-            response = requests.get(url, timeout=3)
-            if response.status_code != 200:
-                errors.append(f"{server_name} is not responding")
-        except RequestException as e:
-            errors.append(f"{server_name} is not responding")
+    # Extrahiere die IP aus der Host-URL (z.B. 172.18.0.1)
+    host_ip = args.windows_host_url.split(':')[0]
     
-    if not state["api_key"].strip():
-        errors.append("LLM API Key is not set")
-
+    # Prüfe Windows Agent und OmniParser Server
+    check_configs = [
+        ('Windows Host', f"{host_ip}:{args.windows_agent_port}", "/probe"),
+        ('OmniParser Server', args.omniparser_server_url, "/probe/") # Wichtig: Slash am Ende
+    ]
+    
+    for server_name, url, endpoint in check_configs:
+        try:
+            full_url = f"http://{url.replace('http://', '')}{endpoint}"
+            response = requests.get(full_url, timeout=3)
+            if response.status_code != 200:
+                errors.append(f"{server_name} antwortet mit {response.status_code}")
+        except:
+            errors.append(f"{server_name} ({url}) ist nicht erreichbar")
+    
+    if not state.get("api_key", "").strip():
+        errors.append("LLM API Key fehlt")
     if not user_input:
-        errors.append("no computer use request provided")
+        errors.append("Keine Anfrage eingegeben")
     
     return errors
+# Verhindert das Nutzen des RAGs wenn diese Begriffe im Prompt vorkommen
+system_keywords = ["öffne", "startmenü", "suche", "herunterladen", "installiere"]
+
+def should_use_rag(user_prompt):
+    # Einfacher Check: Wenn es nur um Windows-Basics geht, RAG weglassen
+    if any(word in user_prompt.lower() for word in system_keywords):
+        return False
+    return True
 
 def process_input(user_input, state):
+    # 1. Sicherstellen, dass user_input nicht None ist
+    if not user_input:
+        user_input = ""
+
     # Reset the stop flag
-    if state["stop"]:
+    if state.get("stop"):
         state["stop"] = False
 
     errors = valid_params(user_input, state)
     if errors:
         raise gr.Error("Validation errors: " + ", ".join(errors))
+
+    # --- RAG INTEGRATION START ---
+    # Wir holen uns den Kontext aus der Datenbank basierend auf der User-Anfrage
+
+    expert_context = "Keine zusätzliche Dokumentation erforderlich."
     
-    # Append the user message to state["messages"]
-    state["messages"].append(
-        {
-            "role": Sender.USER,
-            "content": [TextBlock(type="text", text=user_input)],
-        }
-    )
+    if should_use_rag(user_input):
+        expert_context = rag_manager.get_context(user_input, k=3)
+    
+    # Wir bauen den "angereicherten" Prompt für die KI
+    # Das Fachwissen wird klar vom User-Befehl getrennt
+    enriched_prompt = f"""NUTZE DAS FOLGENDE FACHWISSEN AUS DER DOKUMENTATION:
+    ---
+    {expert_context}
+    ---
+    BASIEREND AUF DIESEM WISSEN, FÜHRE DIE FOLGENDE AUFGABE AUS:
+    {user_input}"""
+    # --- RAG INTEGRATION ENDE ---
 
-    # Append the user's message to chatbot_messages with None for the assistant's reply
-    state['chatbot_messages'].append((user_input, None))
-    yield state['chatbot_messages'], gr.update()  # Yield to update the chatbot UI with the user's message
+    # Nachricht an den internen Log (für die KI) anhängen
+    # WICHTIG: Hier schicken wir den enriched_prompt (Wissen + Aufgabe)
+    state["messages"].append({
+        "role": "user",
+        "content": [{"type": "text", "text": enriched_prompt}],
+    })
 
-    print("state")
-    print(state)
+    # Nachricht an den Chatbot (für die UI) anhängen
+    # WICHTIG: Hier zeigen wir NUR den user_input, damit die UI übersichtlich bleibt
+    state['chatbot_messages'].append({"role": "user", "content": user_input})
+    
+    # Helfer-Funktion zum Reinigen der Liste (verhindert den "None" Fehler in Gradio)
+    def get_safe_chat():
+        return [m for m in state['chatbot_messages'] if m is not None and m.get("content") is not None]
 
-    # Run sampling_loop_sync with the chatbot_output_callback
+    yield get_safe_chat(), gr.update(choices=os.listdir(args.run_folder))
+
+    # Run sampling_loop_sync
+    # Die Loop nutzt automatisch state["messages"], wo jetzt unser RAG-Wissen drinsteckt
     for loop_msg in sampling_loop_sync(
         model=state["model"],
         provider=state["provider"],
@@ -281,18 +369,22 @@ def process_input(user_input, state):
         omniparser_url=args.omniparser_server_url,
         save_folder=str(RUN_FOLDER)
     ):  
-        if loop_msg is None or state.get("stop"):
-            # Detect and add new files to the state
-            file_choices_update = detect_new_files(state)
-            yield state['chatbot_messages'], file_choices_update
-            print("End of task. Close the loop.")
+        if state.get("stop"):
             break
+
+        # Wenn der Loop ein Signal schickt (auch wenn es None ist)
+        if loop_msg is None:
+            file_choices_update = detect_new_files(state)
+            yield gr.skip(), file_choices_update
+            continue
+
+        # Vor jedem UI-Update reinigen wir die Liste
+        yield get_safe_chat(), gr.update()
             
-        yield state['chatbot_messages'], gr.update()  # Yield the updated chatbot_messages to update the chatbot UI
-    
-    # Final detection of new files
+    # Ende der Aufgabe
+    print("End of task. Close the loop.")
     file_choices_update = detect_new_files(state)
-    yield state['chatbot_messages'], file_choices_update
+    yield get_safe_chat(), file_choices_update
 
 def stop_app(state):
     state["stop"] = True
@@ -426,32 +518,67 @@ def get_file_viewer_html(file_path=None):
         size_kb = file_path.stat().st_size / 1024
         return f'<div class="file-viewer"><h3>{file_path.name}</h3><p>File type: {mime_type or "Unknown"}</p><p>Size: {size_kb:.2f} KB</p><p>This file type cannot be displayed in the browser.</p></div>'
 
-def handle_file_upload(files, state):
-    """Handle file uploads and store them in the upload directory"""
+def handle_file_upload(files, state, progress=gr.Progress()):
     if not files:
         return gr.update(choices=[])
     
-    file_choices = []
+    docs_dir = Path("./docs")
+    archive_dir = Path("./archive") # Neuer Ordner für verarbeitete Dateien
     
+    # Ordner erstellen, falls sie nicht existieren
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    
+    uploaded_file_names = []
+
+    # 1. SCHRITT: Dateien in den "Eingangskorb" (docs) kopieren
+    progress(0, desc="Dateien werden vorbereitet...")
     for file in files:
-        # Get the file name and create a path in the upload directory
         file_name = Path(file.name).name
-        file_path = RUN_FOLDER / file_name
+        uploaded_file_names.append(file_name)
         
-        # Save the file
-        shutil.copy(file.name, file_path)
+        # In den RUN_FOLDER für die UI-Anzeige
+        shutil.copy(file.name, RUN_FOLDER / file_name)
         
-        # Add to the list of uploaded files
-        file_path_str = str(file_path)
-        file_choices.append((file_name, file_path_str))
+        # In den docs-Ordner für das RAG-System
+        shutil.copy(file.name, docs_dir / file_name)
         
-        # Add to state
+        # State für das Dropdown aktualisieren
+        file_path_str = str(RUN_FOLDER / file_name)
         if file_path_str not in state['uploaded_files']:
             state['uploaded_files'].append(file_path_str)
+
+    # 2. SCHRITT: Indizierung starten (nur die neuen Dateien im docs-Ordner)
+    gc.collect() 
+    progress(0.5, desc="KI lernt neue Inhalte...")
+    try:
+        # Die Datenbank wird nur mit den Dateien in ./docs aktualisiert
+        rag_manager.update_database(docs_folder="./docs")
+    except Exception as e:
+        print(f"RAG-Fehler: {e}")
+        gr.Warning(f"Fehler bei der Analyse: {e}")
+
+    # 3. SCHRITT: Aufräumen (docs -> archive)
+    # Damit beim nächsten Mal nicht alles doppelt gelesen wird
+    progress(0.9, desc="Verschiebe Dateien ins Archiv...")
+    for file_name in uploaded_file_names:
+        source = docs_dir / file_name
+        destination = archive_dir / file_name
+        
+        try:
+            # Falls die Datei im Archiv schon existiert, überschreiben oder Zeitstempel nutzen
+            if destination.exists():
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                destination = archive_dir / f"{timestamp}_{file_name}"
+            
+            shutil.move(str(source), str(destination))
+        except Exception as e:
+            print(f"Fehler beim Verschieben von {file_name}: {e}")
+
+    gr.Info("✅ Neue Informationen wurden gelernt und archiviert.")
     
-    # Update the view file dropdown with all uploaded files
-    all_file_choices = [(Path(path).name, path) for path in state['uploaded_files']]
-    
+    # Dropdown aktualisieren
+    all_file_choices = [(Path(p).name, p) for p in state['uploaded_files']]
     return gr.update(choices=all_file_choices)
 
 def toggle_view(view_mode, file_path=None, state=None):
