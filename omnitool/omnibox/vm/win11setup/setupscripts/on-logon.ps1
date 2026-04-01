@@ -1,25 +1,24 @@
 # --- KONFIGURATION ---
-$driveLetter = "Z:"
-# WICHTIG: Nutze die Gateway-IP 10.0.2.2 und den Samba-Freigabenamen aus deiner Docker-Config (meist 'data')
-$sharePath = "\\10.0.2.2\data" 
+$driveZ = "Z:"
+$shareZ = "\\10.0.2.2\Data" 
+
+$driveT = "T:"
+$testDataDir = "Z:\testmuster" # Der Pfad auf dem bereits gemounteten Z:
+
 $user = "docker"
 $pass = "docker"
 $scriptFile = "Z:\server\main.py"
 $port = 5050
 
-Write-Host "--- OmniBox Agent: Persistent Boot Mode ---" -ForegroundColor Cyan
+Write-Host "--- OmniBox Agent: Persistent Multi-Drive Mode (SUBST) ---" -ForegroundColor Cyan
 
-# Funktion zum sauberen Trennen und Neu-Verbinden
-function Connect-Drive {
-    Write-Host "Versuche Laufwerk $driveLetter mit $sharePath zu verbinden..." -ForegroundColor Yellow
-    
-    # 1. Altes Laufwerk hart entfernen (falls vorhanden)
-    net use $driveLetter /delete /y 2>$null
-    Start-Sleep -Seconds 2
-
-    # 2. Neu verbinden mit Anmeldedaten
-    # /persistent:no ist wichtig, damit wir beim nächsten Skriptstart keine Konflikte haben
-    net use $driveLetter $sharePath /user:$user $pass /persistent:no
+# Funktion für Netzwerk-Mount (Nur für Z:)
+function Connect-NetworkDrive {
+    param([string]$letter, [string]$path)
+    Write-Host "Verbinde Netzwerk-Laufwerk $letter mit $path..." -ForegroundColor Yellow
+    net use $letter /delete /y 2>$null
+    Start-Sleep -Seconds 1
+    net use $letter $path /user:$user $pass /persistent:no
 }
 
 # --- HAUPTSCHLEIFE ---
@@ -28,16 +27,25 @@ $attempt = 1
 $connected = $false
 
 while (-not $connected -and $attempt -le $maxAttempts) {
-    Write-Host "Samba-Verbindungsversuch $attempt von $maxAttempts..."
+    Write-Host "Verbindungsversuch $attempt von $maxAttempts..."
     
-    Connect-Drive
+    # 1. Z: über das Netzwerk verbinden
+    Connect-NetworkDrive -letter $driveZ -path $shareZ
 
-    # Prüfen ob die Datei nun wirklich da ist
-    if (Test-Path $scriptFile) {
-        $connected = $true
-        Write-Host "Verbindung hergestellt! Datei gefunden." -ForegroundColor Green
+    # 2. Prüfen, ob Z: da ist UND der Unterordner existiert
+    if (Test-Path $testDataDir) {
+        Write-Host "Basis-Pfad $testDataDir gefunden. Erstelle virtuelles Laufwerk $driveT..." -ForegroundColor Yellow
+        
+        # T: über SUBST lokal von Z: abspalten
+        subst $driveT /d 2>$null # Alten Subst löschen
+        subst $driveT $testDataDir
+        
+        if (Test-Path "$driveT\") {
+            $connected = $true
+            Write-Host "Erfolg! Z: (Netz) und T: (Subst) sind bereit." -ForegroundColor Green
+        }
     } else {
-        Write-Host "Pfad noch nicht erreichbar. Warte 5 Sekunden..." -ForegroundColor Magenta
+        Write-Host "Warte auf Netzwerk/Ordner: $testDataDir..." -ForegroundColor Magenta
         Start-Sleep -Seconds 5
         $attempt++
     }
@@ -46,10 +54,7 @@ while (-not $connected -and $attempt -le $maxAttempts) {
 # --- EXECUTION ---
 if ($connected) {
     Write-Host "Starte Python App auf Port $port..." -ForegroundColor Cyan
-    # Wechsel ins Verzeichnis, damit Python relative Pfade im Skript findet
     Set-Location -Path "Z:\"
-    
-    # Python-Start mit Fehlerprüfung
     try {
         python $scriptFile --port $port
     } catch {
@@ -57,6 +62,5 @@ if ($connected) {
         $_.Exception.Message
     }
 } else {
-    Write-Host "!!! ABBRUCH: Z: konnte nach $maxAttempts Versuchen nicht gemountet werden !!!" -ForegroundColor Red
-    Write-Host "Prüfe: Läuft der Samba-Container? Ist 10.0.2.2 anpingbar?" -ForegroundColor Gray
+    Write-Host "!!! ABBRUCH: Testdaten-Pfad wurde nicht gefunden !!!" -ForegroundColor Red
 }

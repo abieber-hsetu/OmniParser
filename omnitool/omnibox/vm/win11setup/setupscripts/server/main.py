@@ -9,7 +9,19 @@ import traceback
 import pyautogui
 from PIL import Image
 from io import BytesIO
+import sys
+import datetime
 
+# Erstellt die Log-Datei im selben Ordner wie diese main.py
+log_path = os.path.join(os.path.dirname(__file__), "agent_hintergrund_log.txt")
+log_file = open(log_path, "a", encoding="utf-8")
+
+log_file.write(f"\n\n{'='*40}\n--- AGENT NEUSTART: {datetime.datetime.now()} ---\n{'='*40}\n")
+log_file.flush()
+
+# Leite ALLES (Prints und Fehler) in diese Datei um
+sys.stdout = log_file
+sys.stderr = log_file
 
 def execute_anything(data):
     shell = data.get('shell', False)
@@ -28,31 +40,21 @@ def execute_anything(data):
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# Klickt den Windows Home Button an   
-# curl -X POST http://localhost:5055/execute      -H "Content-Type: application/json"      -d '{
-#          "action": "mouse_click",
-#          "coordinate": [400, 780]
-#         }'
-# Anschließend Text eintippen
-# curl -X POST http://localhost:5055/execute      -H "Content-Type: application/json"      -d '{
-#          "action": "type_text",
-#          "text": "Hallo Windows!"
-#         }'
-
 def execute(data):
     """Implementierung der UI-Steuerung via PyAutoGUI."""
     try:
         action = data.get('action')
         # Wir unterstützen beides: 'coordinate' als Liste oder direkt 'x' und 'y'
         coords = data.get('coordinate')
-        x = data.get('x') if x is None else data.get('x')
-        y = data.get('y') if y is None else data.get('y')
+        x = data.get('x')
+        y = data.get('y')
         
         # Falls eine Liste [x, y] kommt, entpacken wir sie
         if coords and len(coords) == 2:
             x, y = coords[0], coords[1]
 
-        elif action in ['left_click', 'mouse_click']:
+        # WICHTIG: Hier muss ein normales 'if' stehen, kein 'elif'!
+        if action in ['left_click', 'mouse_click']:
             if x is not None and y is not None:
                 pyautogui.click(x, y)
             else:
@@ -60,12 +62,22 @@ def execute(data):
             return jsonify({'status': 'success', 'message': 'Clicked'})
 
         elif action == 'double_click':
-            pyautogui.doubleClick(x, y)
-            return jsonify({'status': 'success'})
+            if x is not None and y is not None:
+                pyautogui.doubleClick(x, y)
+            else:
+                pyautogui.doubleClick()
+            return jsonify({'status': 'success', 'message': 'Double-clicked'})
 
         elif action == 'right_click':
-            pyautogui.rightClick(x, y)
-            return jsonify({'status': 'success'})
+            if x is not None and y is not None:
+                pyautogui.rightClick(x, y)
+            else:
+                pyautogui.rightClick()
+            return jsonify({'status': 'success', 'message': 'Right-clicked'})
+        
+        elif action == 'wait':
+            time.sleep(3)
+            return jsonify({'status': 'success', 'message': 'Waited and observed UI'})
 
         # --- TASTATUR AKTIONEN ---
         elif action in ['type', 'type_text']:

@@ -6,7 +6,38 @@ python app_new.py --windows_host_url localhost:8006 --omniparser_server_url loca
 """
 
 import os
-# Function to define the tmp-path of gradio
+import io
+import shutil
+import mimetypes
+from datetime import datetime
+try:
+    from enum import StrEnum
+except ImportError:
+    from strenum import StrEnum
+from functools import partial
+from pathlib import Path
+from typing import cast, List, Optional
+import argparse
+from anthropic import APIResponse
+from anthropic.types import TextBlock
+from anthropic.types.beta import BetaMessage, BetaTextBlock, BetaToolUseBlock
+from anthropic.types.tool_use_block import ToolUseBlock
+from loop import (
+    APIProvider,
+    sampling_loop_sync,
+)
+from tools import ToolResult
+import requests
+from requests.exceptions import RequestException
+import base64
+import subprocess
+from dotenv import load_dotenv
+from rag_manager import HsetuRagManager
+import gc
+import re
+import html
+
+# Setup and Check of tmp Path
 def setup_gradio_temp():
     system_tmp = "/tmp/gradio"
     local_tmp = "./.gradio_tmp"
@@ -33,39 +64,22 @@ def setup_gradio_temp():
         # Gradio über die Umgebungsvariable umleiten
         os.environ["GRADIO_TEMP_DIR"] = os.path.abspath(local_tmp)
 
-setup_gradio_temp()
-import io
-import shutil
-import mimetypes
-from datetime import datetime
-try:
-    from enum import StrEnum
-except ImportError:
-    from strenum import StrEnum
-    
-from functools import partial
-from pathlib import Path
-from typing import cast, List, Optional
-import argparse
-import gradio as gr
-from anthropic import APIResponse
-from anthropic.types import TextBlock
-from anthropic.types.beta import BetaMessage, BetaTextBlock, BetaToolUseBlock
-from anthropic.types.tool_use_block import ToolUseBlock
-from loop import (
-    APIProvider,
-    sampling_loop_sync,
-)
-from tools import ToolResult
-import requests
-from requests.exceptions import RequestException
-import base64
-import subprocess
-from dotenv import load_dotenv
-from rag_manager import HsetuRagManager
-import gc
+def get_safe_filepath(file_obj):
+    """Robust way to get filepath across different Gradio versions"""
+    if file_obj is None:
+        return None
+    if isinstance(file_obj, str):
+        return file_obj
+    if isinstance(file_obj, dict) and "path" in file_obj:
+        return file_obj["path"]
+    if hasattr(file_obj, "name"):
+        return file_obj.name
+    return str(file_obj)
 
-load_dotenv
+setup_gradio_temp()
+import gradio as gr
+
+load_dotenv() # Fix: missing parentheses added
 
 rag_manager = HsetuRagManager()
 
@@ -75,7 +89,7 @@ API_KEY_FILE = CONFIG_DIR / "api_key"
 INTRO_TEXT = '''
 <div style="text-align: center; margin-bottom: 10px;">
     <h2>OmniParser AI Agent</h2>
-    <p>Turn any vision-language model into an AI agent. We currently support <b>OpenAI (4o/o1/o3-mini), DeepSeek (R1), Qwen (2.5VL) or Anthropic Computer Use (Sonnet)</b>.</p>
+    <p>Turn any vision-language model into an AI agent. We currently support <b>OpenAI (4o/o1/o3-mini/gpt-5.4), DeepSeek (R1), Qwen (2.5VL) or Anthropic Computer Use (Sonnet)</b>.</p>
     <p>Type a message and press send to start OmniTool. Press stop to pause, and press the trash icon in the chat to clear the message history.</p>
     <p>You can also upload files for analysis using the file upload section.</p>
 </div>
@@ -120,7 +134,7 @@ def setup_state(state):
     if "messages" not in state:
         state["messages"] = []
     if "model" not in state:
-        state["model"] = "omniparser + gpt-4o-orchestrated"
+        state["model"] = "omniparser + gpt-5.4-orchestrated"
     if "provider" not in state:
         state["provider"] = "openai"
     if "openai_api_key" not in state:  # Fetch API keys from environment variables
@@ -141,6 +155,10 @@ def setup_state(state):
         state['chatbot_messages'] = []
     if 'stop' not in state:
         state['stop'] = False
+    if 'instruction_steps' not in state:
+        state['instruction_steps'] = []
+    if 'current_step_index' not in state:
+        state['current_step_index'] = 0
     if 'uploaded_files' not in state:
         state['uploaded_files'] = []  # Start with an empty list instead of loading existing files
 
@@ -228,25 +246,12 @@ def chatbot_output_callback(message, chatbot_state, hide_images=False, sender="b
             if message.error:
                 return f"Error: {message.error}"
             if message.base64_image and not hide_images:
-                # somehow can't display via gr.Image
-                # image_data = base64.b64decode(message.base64_image)
-                # return gr.Image(value=Image.open(io.BytesIO(image_data)))
                 return f'<img src="data:image/png;base64,{message.base64_image}">'
 
         elif isinstance(message, BetaTextBlock) or isinstance(message, TextBlock):
-            # Format reasoning text in a collapsible dropdown
+            # Format reasoning text 
             return f"Next step Reasoning: {message.text}"
-            # reasoning_text = message.text
-            # return f'''
-            # <details>
-            #     <summary><Current Step Reasoning (click to expand):</summary>
-            #     <div style="padding: 10px; background-color: #f8f9fa; border-radius: 5px; margin-top: 5px;">
-            #         <pre>{reasoning_text}</pre>
-            #     </div>
-            # </details>
-            # '''
         elif isinstance(message, BetaToolUseBlock) or isinstance(message, ToolUseBlock):
-            # return f"Next I will perform the following action: {message.input}"
             return None
         else:  
             return message
@@ -256,19 +261,17 @@ def chatbot_output_callback(message, chatbot_state, hide_images=False, sender="b
         if isinstance(s, str) and len(s) > max_length:
             return s[:max_length] + "..."
         return s
+    
     # processing Anthropic messages
     message = _render_message(message, hide_images)
     
-    # Das ist die wichtige Änderung für Gradio 5:
     if sender == "bot":
         chatbot_state.append({"role": "assistant", "content": message})
     else:
         chatbot_state.append({"role": "user", "content": message})
     
-    # Create a concise version of the chatbot state for printing
     concise_state = [(_truncate_string(user_msg), _truncate_string(bot_msg))
                         for user_msg, bot_msg in chatbot_state]
-    # print(f"chatbot_output_callback chatbot_state: {concise_state} (truncated)")
 
 def valid_params(user_input, state):
     errors = []
@@ -297,6 +300,7 @@ def valid_params(user_input, state):
         errors.append("Keine Anfrage eingegeben")
     
     return errors
+
 # Verhindert das Nutzen des RAGs wenn diese Begriffe im Prompt vorkommen
 system_keywords = ["öffne", "startmenü", "suche", "herunterladen", "installiere"]
 
@@ -307,55 +311,37 @@ def should_use_rag(user_prompt):
     return True
 
 def process_input(user_input, state):
-    # 1. Sicherstellen, dass user_input nicht None ist
     if not user_input:
         user_input = ""
 
-    # Reset the stop flag
     if state.get("stop"):
         state["stop"] = False
 
     errors = valid_params(user_input, state)
     if errors:
         raise gr.Error("Validation errors: " + ", ".join(errors))
-
-    # --- RAG INTEGRATION START ---
-    # Wir holen uns den Kontext aus der Datenbank basierend auf der User-Anfrage
-
-    expert_context = "Keine zusätzliche Dokumentation erforderlich."
     
-    if should_use_rag(user_input):
-        expert_context = rag_manager.get_context(user_input, k=3)
-    
-    # Wir bauen den "angereicherten" Prompt für die KI
-    # Das Fachwissen wird klar vom User-Befehl getrennt
-    enriched_prompt = f"""NUTZE DAS FOLGENDE FACHWISSEN AUS DER DOKUMENTATION:
-    ---
-    {expert_context}
-    ---
-    BASIEREND AUF DIESEM WISSEN, FÜHRE DIE FOLGENDE AUFGABE AUS:
-    {user_input}"""
-    # --- RAG INTEGRATION ENDE ---
-
-    # Nachricht an den internen Log (für die KI) anhängen
-    # WICHTIG: Hier schicken wir den enriched_prompt (Wissen + Aufgabe)
+    # Nachricht an den internen Log (für die KI)
     state["messages"].append({
         "role": "user",
-        "content": [{"type": "text", "text": enriched_prompt}],
+        "content": [{"type": "text", "text": user_input}],
     })
 
-    # Nachricht an den Chatbot (für die UI) anhängen
-    # WICHTIG: Hier zeigen wir NUR den user_input, damit die UI übersichtlich bleibt
+    # Nachricht an den Chatbot (UI)
     state['chatbot_messages'].append({"role": "user", "content": user_input})
     
-    # Helfer-Funktion zum Reinigen der Liste (verhindert den "None" Fehler in Gradio)
     def get_safe_chat():
         return [m for m in state['chatbot_messages'] if m is not None and m.get("content") is not None]
 
     yield get_safe_chat(), gr.update(choices=os.listdir(args.run_folder))
 
+    if hasattr(state["model"], "set_instructions"):
+        state["model"].set_instructions(
+            steps=state.get("instruction_steps", []),
+            program_name=state.get("program_name") 
+        )
+
     # Run sampling_loop_sync
-    # Die Loop nutzt automatisch state["messages"], wo jetzt unser RAG-Wissen drinsteckt
     for loop_msg in sampling_loop_sync(
         model=state["model"],
         provider=state["provider"],
@@ -367,12 +353,13 @@ def process_input(user_input, state):
         only_n_most_recent_images=state["only_n_most_recent_images"],
         max_tokens=16384,
         omniparser_url=args.omniparser_server_url,
+        instruction_steps=state.get("instruction_steps", []),
+        current_step_index=state.get("current_step_index", 0),
         save_folder=str(RUN_FOLDER)
     ):  
         if state.get("stop"):
             break
 
-        # Wenn der Loop ein Signal schickt (auch wenn es None ist)
         if loop_msg is None:
             file_choices_update = detect_new_files(state)
             yield gr.skip(), file_choices_update
@@ -392,7 +379,6 @@ def stop_app(state):
 
 def get_header_image_base64():
     try:
-        # Get the absolute path to the image relative to this script
         script_dir = Path(__file__).parent
         image_path = script_dir.parent.parent / "imgs" / "header_bar_thin.png"
         
@@ -406,101 +392,43 @@ def get_header_image_base64():
 def get_file_viewer_html(file_path=None):
     """Generate HTML to view a file based on its type"""
     if not file_path:
-        # Return the VNC viewer iframe
         return f'<iframe src="http://{args.windows_host_url}/vnc.html?view_only=1&autoconnect=1&resize=scale" width="100%" height="580" allow="fullscreen"></iframe>'
     
     file_path = Path(file_path)
     if not file_path.exists():
         return f'<div class="error-message">File not found: {file_path.name}</div>'
     
-    # Determine the file type
     mime_type, _ = mimetypes.guess_type(file_path)
     file_type = mime_type.split('/')[0] if mime_type else 'unknown'
     file_extension = file_path.suffix.lower()
     
-    # Handle different file types
     if file_type == 'image':
-        # For images, display them directly
         with open(file_path, "rb") as image_file:
             encoded_string = base64.b64encode(image_file.read()).decode()
             return f'<div class="file-viewer"><h3>{file_path.name}</h3><img src="data:{mime_type};base64,{encoded_string}" style="max-width:100%; max-height:500px;"></div>'
     
     elif file_extension in ['.txt', '.py', '.js', '.html', '.css', '.json', '.md', '.csv'] or file_type == 'text':
-        # For text files, display the content with syntax highlighting for code
         try:
-            content = file_path.read_text(errors='replace')  # Use 'replace' to handle encoding issues
-            # Escape HTML characters
+            content = file_path.read_text(errors='replace')
             content = content.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
             
-            # Add syntax highlighting class based on file extension
             highlight_class = ""
-            if file_extension == '.py':
-                highlight_class = "language-python"
-            elif file_extension == '.js':
-                highlight_class = "language-javascript"
-            elif file_extension == '.html':
-                highlight_class = "language-html"
-            elif file_extension == '.css':
-                highlight_class = "language-css"
-            elif file_extension == '.json':
-                highlight_class = "language-json"
+            if file_extension == '.py': highlight_class = "language-python"
+            elif file_extension == '.js': highlight_class = "language-javascript"
+            elif file_extension == '.html': highlight_class = "language-html"
+            elif file_extension == '.css': highlight_class = "language-css"
+            elif file_extension == '.json': highlight_class = "language-json"
             
             return f'''
             <div class="file-viewer">
                 <h3>{file_path.name}</h3>
                 <pre class="{highlight_class}" style="background-color: #f5f5f5; padding: 10px; border-radius: 5px; overflow: auto; max-height: 500px; white-space: pre-wrap;"><code>{content}</code></pre>
-                <script>
-                    // Add basic syntax highlighting with CSS
-                    if (document.querySelector('.language-python')) {{
-                        const keywords = ['def', 'class', 'import', 'from', 'return', 'if', 'else', 'elif', 'for', 'while', 'try', 'except', 'with', 'as', 'in', 'not', 'and', 'or', 'True', 'False', 'None'];
-                        const code = document.querySelector('.language-python code');
-                        let html = code.innerHTML;
-                        keywords.forEach(keyword => {{
-                            const regex = new RegExp('\\\\b' + keyword + '\\\\b', 'g');
-                            html = html.replace(regex, `<span style="color: #0000FF; font-weight: bold;">$&</span>`);
-                        }});
-                        // Highlight strings
-                        html = html.replace(/(["'])(?:(?=(\\\\?))\2.)*?\1/g, '<span style="color: #008000;">$&</span>');
-                        // Highlight comments
-                        html = html.replace(/(#.*)$/gm, '<span style="color: #808080;">$1</span>');
-                        code.innerHTML = html;
-                    }}
-                </script>
             </div>
             '''
         except UnicodeDecodeError:
             return f'<div class="error-message">Cannot display binary file: {file_path.name}</div>'
     
-    elif file_type == 'video':
-        # For videos, use video tag
-        with open(file_path, "rb") as video_file:
-            encoded_string = base64.b64encode(video_file.read()).decode()
-            return f'''
-            <div class="file-viewer">
-                <h3>{file_path.name}</h3>
-                <video controls style="max-width:100%; max-height:500px;">
-                    <source src="data:{mime_type};base64,{encoded_string}" type="{mime_type}">
-                    Your browser does not support the video tag.
-                </video>
-            </div>
-            '''
-    
-    elif file_type == 'audio':
-        # For audio, use audio tag
-        with open(file_path, "rb") as audio_file:
-            encoded_string = base64.b64encode(audio_file.read()).decode()
-            return f'''
-            <div class="file-viewer">
-                <h3>{file_path.name}</h3>
-                <audio controls>
-                    <source src="data:{mime_type};base64,{encoded_string}" type="{mime_type}">
-                    Your browser does not support the audio tag.
-                </audio>
-            </div>
-            '''
-    
     elif file_extension == '.pdf':
-        # For PDFs, embed them using an iframe with base64 data
         try:
             with open(file_path, "rb") as pdf_file:
                 encoded_string = base64.b64encode(pdf_file.read()).decode()
@@ -512,9 +440,7 @@ def get_file_viewer_html(file_path=None):
                 '''
         except Exception as e:
             return f'<div class="error-message">Error displaying PDF: {str(e)}</div>'
-    
     else:
-        # For other file types, show info but can't display
         size_kb = file_path.stat().st_size / 1024
         return f'<div class="file-viewer"><h3>{file_path.name}</h3><p>File type: {mime_type or "Unknown"}</p><p>Size: {size_kb:.2f} KB</p><p>This file type cannot be displayed in the browser.</p></div>'
 
@@ -523,82 +449,65 @@ def handle_file_upload(files, state, progress=gr.Progress()):
         return gr.update(choices=[])
     
     docs_dir = Path("./docs")
-    archive_dir = Path("./archive") # Neuer Ordner für verarbeitete Dateien
+    archive_dir = Path("./archive")
     
-    # Ordner erstellen, falls sie nicht existieren
     docs_dir.mkdir(parents=True, exist_ok=True)
     archive_dir.mkdir(parents=True, exist_ok=True)
     
     uploaded_file_names = []
 
-    # 1. SCHRITT: Dateien in den "Eingangskorb" (docs) kopieren
     progress(0, desc="Dateien werden vorbereitet...")
-    for file in files:
-        file_name = Path(file.name).name
+    for file_obj in files:
+        # NEU: Auch hier der sichere Pfad
+        file_path_str = get_safe_filepath(file_obj)
+        file_name = Path(file_path_str).name
+        
         uploaded_file_names.append(file_name)
+        shutil.copy(file_path_str, RUN_FOLDER / file_name)
+        shutil.copy(file_path_str, docs_dir / file_name)
         
-        # In den RUN_FOLDER für die UI-Anzeige
-        shutil.copy(file.name, RUN_FOLDER / file_name)
-        
-        # In den docs-Ordner für das RAG-System
-        shutil.copy(file.name, docs_dir / file_name)
-        
-        # State für das Dropdown aktualisieren
-        file_path_str = str(RUN_FOLDER / file_name)
         if file_path_str not in state['uploaded_files']:
             state['uploaded_files'].append(file_path_str)
 
-    # 2. SCHRITT: Indizierung starten (nur die neuen Dateien im docs-Ordner)
     gc.collect() 
     progress(0.5, desc="KI lernt neue Inhalte...")
     try:
-        # Die Datenbank wird nur mit den Dateien in ./docs aktualisiert
         rag_manager.update_database(docs_folder="./docs")
     except Exception as e:
         print(f"RAG-Fehler: {e}")
         gr.Warning(f"Fehler bei der Analyse: {e}")
 
-    # 3. SCHRITT: Aufräumen (docs -> archive)
-    # Damit beim nächsten Mal nicht alles doppelt gelesen wird
     progress(0.9, desc="Verschiebe Dateien ins Archiv...")
     for file_name in uploaded_file_names:
         source = docs_dir / file_name
         destination = archive_dir / file_name
         
         try:
-            # Falls die Datei im Archiv schon existiert, überschreiben oder Zeitstempel nutzen
             if destination.exists():
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 destination = archive_dir / f"{timestamp}_{file_name}"
-            
             shutil.move(str(source), str(destination))
         except Exception as e:
             print(f"Fehler beim Verschieben von {file_name}: {e}")
 
     gr.Info("✅ Neue Informationen wurden gelernt und archiviert.")
-    
-    # Dropdown aktualisieren
     all_file_choices = [(Path(p).name, p) for p in state['uploaded_files']]
     return gr.update(choices=all_file_choices)
 
 def toggle_view(view_mode, file_path=None, state=None):
-    """Toggle between OmniTool Computer view and file viewer"""
-    # If switching to File Viewer mode, detect and add new files to the state
     file_choices_update = gr.update()
     if view_mode == "File Viewer" and state is not None:
         file_choices_update = detect_new_files(state)
     
-    # Return the appropriate view
     if view_mode == "OmniTool Computer":
-        return get_file_viewer_html(), file_choices_update  # This returns the VNC iframe
-    else:  # File Viewer mode
+        return get_file_viewer_html(), file_choices_update
+    else:
         if file_path:
             return get_file_viewer_html(file_path), file_choices_update
         else:
-            return get_file_viewer_html(), file_choices_update  # Default to VNC if no file selected
+            return get_file_viewer_html(), file_choices_update
 
 def detect_new_files(state):
-    """Detect new files in the uploads folder and add them to the state"""
     new_files_count = 0
     if RUN_FOLDER.exists():
         current_files = set(state['uploaded_files'])
@@ -606,36 +515,72 @@ def detect_new_files(state):
             if file_path.is_file():
                 file_path_str = str(file_path)
                 if file_path_str not in current_files:
-                    # This is a new file not yet in the state
                     state['uploaded_files'].append(file_path_str)
                     new_files_count += 1
-                    print(f"Added new file to state: {file_path_str}")
     
-    # Return updated file choices
     file_choices = [(Path(path).name, path) for path in state['uploaded_files']]
-    print(f"Detected {new_files_count} new files. Total files in state: {len(state['uploaded_files'])}")
     return gr.update(choices=file_choices)
 
 def refresh_files(state):
-    """Refresh the list of files from the current session and detect new files"""
     return detect_new_files(state)
 
-def auto_refresh_files(state):
-    """Automatically refresh the list of files from the current session and detect new files"""
-    return detect_new_files(state)
 
+# =========================================================================
+# GRADIO UI SETUP
+# =========================================================================
 with gr.Blocks(theme=gr.themes.Default()) as demo:
     gr.HTML("""
         <style>
-        .no-padding {
-            padding: 0 !important;
+        .left-upload-area {
+            flex-grow: 1 !important; 
+            min-height: 250px !important;
+            margin-bottom: 10px !important;
         }
-        .no-padding > div {
-            padding: 0 !important;
+        
+        .fixed-header-text {
+            margin-bottom: 5px !important;
+            margin-top: 10px !important;
+            font-weight: bold;
         }
-        .markdown-text p {
-            font-size: 18px;  /* Adjust the font size as needed */
+
+        /* DIE EINZIGE SCROLL-BOX */
+        .scroll-box {
+            max-height: 400px !important; 
+            overflow-y: auto !important; 
+            border: 1px solid var(--border-color-primary, #4b5563) !important; 
+            border-radius: 8px !important;
+            background-color: transparent !important; 
+            padding: 15px !important;
+            box-sizing: border-box !important; 
         }
+
+        .placeholder-center {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100px;
+            color: #9ca3af; 
+            font-style: italic;
+            font-size: 1.2em;
+        }
+
+        .list-active {
+            text-align: left;
+            color: var(--body-text-color, #e5e7eb); 
+            line-height: 1.6;
+            padding-bottom: 10px !important; 
+        }
+
+        /* --- DER ULTIMATIVE KILL-SWITCH --- */
+        /* Verbietet der äußeren Spalte und all ihren Hilfs-Containern JEDEN Scrollbalken! */
+        .no-outer-scroll {
+            overflow-y: hidden !important;
+        }
+        .no-outer-scroll > div,
+        .no-outer-scroll > .wrap {
+            overflow-y: hidden !important;
+        }
+        
         </style>
     """)
     state = gr.State({})
@@ -652,13 +597,14 @@ with gr.Blocks(theme=gr.themes.Default()) as demo:
     if not os.getenv("HIDE_WARNING", False):
         gr.HTML(INTRO_TEXT, elem_classes="markdown-text")
 
+    # Settings Section
     with gr.Accordion("Settings", open=True, elem_classes="accordion-header"): 
         with gr.Row():
             with gr.Column():
                 model = gr.Dropdown(
                     label="Model",
-                    choices=["omniparser + gpt-4o", "omniparser + o1", "omniparser + o3-mini", "omniparser + R1", "omniparser + qwen2.5vl", "claude-3-5-sonnet-20241022", "omniparser + gpt-4o-orchestrated", "omniparser + o1-orchestrated", "omniparser + o3-mini-orchestrated", "omniparser + R1-orchestrated", "omniparser + qwen2.5vl-orchestrated"],
-                    value="omniparser + gpt-4o-orchestrated",
+                    choices=["omniparser + gpt-4o", "omniparser + o1", "omniparser + o3-mini", "omniparser + R1", "omniparser + qwen2.5vl", "claude-3-5-sonnet-20241022", "omniparser + gpt-4o-orchestrated", "omniparser + o1-orchestrated", "omniparser + o3-mini-orchestrated", "omniparser + gpt-5.4-orchestrated", "omniparser + R1-orchestrated", "omniparser + qwen2.5vl-orchestrated"],
+                    value="omniparser + gpt-5.4-orchestrated",
                     interactive=True,
                     container=True
                 )
@@ -691,22 +637,37 @@ with gr.Blocks(theme=gr.themes.Default()) as demo:
                 )
 
     # File Upload Section
-    with gr.Accordion("File Upload & Management", open=True, elem_classes="accordion-header"):
-        with gr.Row():
+    with gr.Accordion("File Upload & Management", open=True):
+        with gr.Row(equal_height=True): 
+            
+            # LINKE SPALTE
             with gr.Column():
                 file_upload = gr.File(
-                    label="Upload Files",
-                    file_count="multiple",
-                    type="filepath",
-                    elem_classes="file-upload-area"
+                    label="Upload Files", 
+                    file_count="multiple", 
+                    elem_classes="left-upload-area"
                 )
-            with gr.Column():
                 with gr.Row():
-                    upload_button = gr.Button("Upload Files", variant="primary", elem_classes="primary-button")
-                    refresh_button = gr.Button("Refresh Files", variant="secondary", elem_classes="secondary-button")
-        
+                    upload_button = gr.Button("Upload Files", variant="primary")
+                    refresh_button = gr.Button("Refresh Files", variant="secondary")
+
+            # RECHTE SPALTE (HIER WIRD DER KILL-SWITCH AKTIVIERT)
+            with gr.Column(elem_classes="no-outer-scroll"):
+                instruction_upload = gr.File(
+                    label="Anweisung.pdf hochladen", 
+                    file_count="single",
+                    type="filepath" 
+                )
+                
+                gr.Markdown("### 📋 Erfasste Testschritte", elem_classes="fixed-header-text")
+                
+                # DIE EINZIGE SCROLLBOX
+                instruction_status = gr.HTML(
+                    value='<div class="placeholder-center">Warte auf Anweisungs-PDF...</div>',
+                    elem_id="instruction-steps-list",
+                    elem_classes="scroll-box"
+                )
         with gr.Row():
-            # Initialize file choices as an empty list
             view_file_dropdown = gr.Dropdown(
                 label="View File",
                 choices=[],
@@ -720,6 +681,7 @@ with gr.Blocks(theme=gr.themes.Default()) as demo:
                 interactive=True
             )
 
+    # Prompt Line
     with gr.Row():
         with gr.Column(scale=8):
             chat_input = gr.Textbox(
@@ -732,6 +694,7 @@ with gr.Blocks(theme=gr.themes.Default()) as demo:
         with gr.Column(scale=1, min_width=50):
             stop_button = gr.Button(value="Stop", variant="secondary", elem_classes="secondary-button")
 
+    # Chat
     with gr.Row():
         with gr.Column(scale=2):
             chatbot = gr.Chatbot(
@@ -752,7 +715,7 @@ with gr.Blocks(theme=gr.themes.Default()) as demo:
         
         if model_selection == "claude-3-5-sonnet-20241022":
             provider_choices = [option.value for option in APIProvider if option.value != "openai"]
-        elif model_selection in set(["omniparser + gpt-4o", "omniparser + o1", "omniparser + o3-mini", "omniparser + gpt-4o-orchestrated", "omniparser + o1-orchestrated", "omniparser + o3-mini-orchestrated"]):
+        elif model_selection in set(["omniparser + gpt-4o", "omniparser + o1", "omniparser + o3-mini", "omniparser + gpt-4o-orchestrated", "omniparser + o1-orchestrated", "omniparser + o3-mini-orchestrated", "omniparser + gpt-5.4-orchestrated"]):
             provider_choices = ["openai"]
         elif model_selection == "omniparser + R1":
             provider_choices = ["groq"]
@@ -765,11 +728,9 @@ with gr.Blocks(theme=gr.themes.Default()) as demo:
         provider_interactive = len(provider_choices) > 1
         api_key_placeholder = f"{default_provider_value.title()} API Key"
 
-        # Update state
         state["provider"] = default_provider_value
         state["api_key"] = state.get(f"{default_provider_value}_api_key", "")
 
-        # Calls to update other components UI
         provider_update = gr.update(
             choices=provider_choices,
             value=default_provider_value,
@@ -786,11 +747,9 @@ with gr.Blocks(theme=gr.themes.Default()) as demo:
         state["only_n_most_recent_images"] = only_n_images_value
    
     def update_provider(provider_value, state):
-        # Update state
         state["provider"] = provider_value
         state["api_key"] = state.get(f"{provider_value}_api_key", "")
         
-        # Calls to update other components UI
         api_key_update = gr.update(
             placeholder=f"{provider_value.title()} API Key",
             value=state["api_key"]
@@ -802,7 +761,6 @@ with gr.Blocks(theme=gr.themes.Default()) as demo:
         state[f'{state["provider"]}_api_key'] = api_key_value
 
     def clear_chat(state):
-        # Reset message-related state
         state["messages"] = []
         state["responses"] = {}
         state["tools"] = {}
@@ -810,25 +768,86 @@ with gr.Blocks(theme=gr.themes.Default()) as demo:
         return state['chatbot_messages']
 
     def view_file(file_path, view_mode):
-        """Generate HTML to view the selected file if in File Viewer mode"""
         if view_mode == "File Viewer" and file_path:
             return get_file_viewer_html(file_path)
         elif view_mode == "OmniTool Computer":
-            return get_file_viewer_html()  # Return VNC viewer
+            return get_file_viewer_html()
         else:
-            return display_area.value  # Keep current display
+            return display_area.value
 
     def update_view_file_dropdown(uploaded_files):
-        """Update the view file dropdown when uploaded files change"""
         if not uploaded_files:
             return gr.update(choices=[])
         
         file_choices = [(Path(path).name, path) for path in uploaded_files]
         return gr.update(choices=file_choices)
+    
+    def get_safe_filepath(file_obj):
+        """Kugelsicherer Weg, um den Dateipfad in ALLEN Gradio-Versionen zu bekommen"""
+        if file_obj is None: return None
+        if isinstance(file_obj, str): return file_obj
+        if hasattr(file_obj, "path"): return file_obj.path # <-- WICHTIG FÜR GRADIO 4!
+        if isinstance(file_obj, dict) and "path" in file_obj: return file_obj["path"]
+        if hasattr(file_obj, "name"): return file_obj.name
+        return str(file_obj)
 
-    def reset_view():
-        """Reset the view to the VNC viewer"""
-        return get_file_viewer_html()
+    def handle_instruction_upload(file_path, state, progress=gr.Progress()):
+        if not file_path:
+            return state, '<div class="placeholder-center">Warte auf Anweisungs-PDF...</div>'
+        
+        try:
+            progress(0, desc="Lese PDF-Struktur...")
+            instruction_data = rag_manager.parse_instruction_pdf(file_path)
+            list_of_steps = instruction_data.get("steps", [])
+            prog_name = instruction_data.get("program_name", "Unbekanntes Programm")
+            
+        except Exception as e:
+            print(f"Absturz im PDF Parser: {e}")
+            return state, f'<div class="placeholder-center" style="color: #ef4444;">❌ Fehler beim Lesen: {str(e)}</div>'
+        
+        if not list_of_steps:
+            return state, '<div class="placeholder-center" style="color: #ef4444;">❌ Keine Inhalte in der PDF gefunden.</div>'
+        
+        state["instruction_steps"] = list_of_steps
+        state["current_step_index"] = 0
+        
+        progress(0.7, desc="Strukturiere Testplan...")
+        
+        summary = '<div class="list-active">'
+        summary += f'<h3 style="margin-bottom: 5px;">✅ Fahrplan für {prog_name}</h3>'
+        summary += '<hr style="border: 0; border-top: 1px solid #374151; margin-bottom: 15px;">'
+        
+        for i, step in enumerate(list_of_steps):
+            clean_step = re.sub(r'(?<![•\-\*|])\n(?![•\-\*|])', ' ', step)
+            clean_step = re.sub(r'\s+', ' ', clean_step).strip()
+            
+            import html
+            clean_step = html.escape(clean_step)
+            
+            if any(marker in clean_step for marker in ['|', '•', '- ']):
+                parts = re.split(r'\s*[|•]|\s+-\s+', clean_step)
+                header = parts[0].strip()
+                items = [p.strip() for p in parts[1:] if p.strip()]
+                
+                item_html = "".join([f'<li style="margin-bottom: 5px;">{it}</li>' for it in items])
+                content_html = f'{header}<ul style="margin-top: 8px; padding-left: 20px; color: #9ca3af;">{item_html}</ul>'
+            else:
+                content_html = clean_step
+
+            summary += f'''
+                <div style="margin-bottom: 25px;">
+                    <div style="font-weight: bold; font-size: 0.9em; text-transform: uppercase; letter-spacing: 0.05em;">
+                        Schritt {i+1}
+                    </div>
+                    <div style="font-size: 1.05em; line-height: 1.6; margin-top: 4px;">
+                        {content_html}
+                    </div>
+                </div>
+            '''
+        
+        summary += '</div>'
+        progress(1.0, desc="Testplan bereit.")
+        return state, summary
 
     model.change(fn=update_model, inputs=[model, state], outputs=[provider, api_key])
     only_n_images.change(fn=update_only_n_images, inputs=[only_n_images, state], outputs=None)
@@ -836,14 +855,18 @@ with gr.Blocks(theme=gr.themes.Default()) as demo:
     api_key.change(fn=update_api_key, inputs=[api_key, state], outputs=None)
     chatbot.clear(fn=clear_chat, inputs=[state], outputs=[chatbot])
 
-    # File upload event handlers
     upload_button.click(
         fn=handle_file_upload,
         inputs=[file_upload, state],
         outputs=[view_file_dropdown]
     )
+
+    instruction_upload.change(
+        fn=handle_instruction_upload, 
+        inputs=[instruction_upload, state], 
+        outputs=[state, instruction_status]
+    )
     
-    # File viewing handlers
     view_file_dropdown.change(
         fn=view_file,
         inputs=[view_file_dropdown, view_toggle],
@@ -853,22 +876,17 @@ with gr.Blocks(theme=gr.themes.Default()) as demo:
     submit_button.click(process_input, [chat_input, state], [chatbot, view_file_dropdown])
     stop_button.click(stop_app, [state], None)
     
-    # Toggle view handler
     view_toggle.change(
         fn=toggle_view, 
         inputs=[view_toggle, view_file_dropdown, state], 
         outputs=[display_area, view_file_dropdown]
     )
     
-    # Refresh files handler
     refresh_button.click(fn=refresh_files, inputs=[state], outputs=[view_file_dropdown])
     
-    # Add JavaScript for auto-refresh instead of using demo.load()
     js_refresh = """
     function() {
-        // Auto-refresh files every 5 seconds
         const refreshInterval = setInterval(function() {
-            // Find and click the refresh button
             const refreshButtons = document.querySelectorAll('button');
             for (const button of refreshButtons) {
                 if (button.textContent.includes('Refresh Files')) {
@@ -878,13 +896,11 @@ with gr.Blocks(theme=gr.themes.Default()) as demo:
             }
         }, 5000);
         
-        // Return a cleanup function
         return () => clearInterval(refreshInterval);
     }
     """
     
-    # Add the JavaScript to the page
     gr.HTML("<script>(" + js_refresh + ")();</script>")
-    
+
 if __name__ == "__main__":
     demo.launch(server_name="127.0.0.1", server_port=7888)

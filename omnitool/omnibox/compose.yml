@@ -12,7 +12,7 @@ services:
       CPU_MODEL: "host"
       NET_TYPE: "none"
       PASST: "N"
-      ARGUMENTS: "-netdev user,id=net0,hostfwd=tcp::5055-:5050 -device e1000,netdev=net0"
+      ARGUMENTS: "-netdev user,id=net0,hostfwd=tcp::5055-:5050 -device e1000,netdev=net0 -vga none -device virtio-vga,xres=1920,yres=1080"
       DEBUG: "Y"
       VIEW: "VNC"
       WEBVIEW: "Y"
@@ -35,3 +35,4 @@ services:
       - "./vm/win11storage:/storage"
       - "./vm/win11setup/setupscripts:/run/import"
       - "./smb.conf:/etc/samba/smb.conf"
+      - "./testmuster:/storage/test_files"
