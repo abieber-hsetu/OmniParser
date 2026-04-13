@@ -392,7 +392,8 @@ def get_header_image_base64():
 def get_file_viewer_html(file_path=None):
     """Generate HTML to view a file based on its type"""
     if not file_path:
-        return f'<iframe src="http://{args.windows_host_url}/vnc.html?view_only=1&autoconnect=1&resize=scale" width="100%" height="580" allow="fullscreen"></iframe>'
+        # Hier wurden width und height entfernt, das regelt jetzt das .vm-wrapper CSS!
+        return f'<iframe src="http://{args.windows_host_url}/vnc.html?view_only=1&autoconnect=1&resize=scale" allow="fullscreen"></iframe>'
     
     file_path = Path(file_path)
     if not file_path.exists():
@@ -545,12 +546,12 @@ with gr.Blocks(theme=gr.themes.Default()) as demo:
 
         /* DIE EINZIGE SCROLL-BOX */
         .scroll-box {
+            min-height: 100px !important; /* <--- NEU: Verhindert, dass die Box unsichtbar wird! */
             max-height: 400px !important; 
             overflow-y: auto !important; 
-            border: 1px solid var(--border-color-primary, #4b5563) !important; 
-            border-radius: 8px !important;
+            border: none !important; 
             background-color: transparent !important; 
-            padding: 15px !important;
+            padding: 10px 5px !important; 
             box-sizing: border-box !important; 
         }
 
@@ -581,6 +582,72 @@ with gr.Blocks(theme=gr.themes.Default()) as demo:
             overflow-y: hidden !important;
         }
         
+        .vm-wrapper > div {
+            padding: 0 !important;
+            margin: 0 !important;
+            width: 100% !important;
+            height: 100% !important;
+            display: flex !important;
+        }
+
+        .vm-wrapper {
+            width: 100% !important;
+            max-width: 100% !important;
+            padding: 0 !important;
+            margin: 0 !important;
+            border: 1px solid var(--border-color-primary, #4b5563) !important;
+            border-radius: 5px !important;
+            height: 580px !important; /* Hält den Container exakt so hoch wie den Chat */
+            overflow: hidden !important;
+            background-color: var(--background-fill-secondary, #1f2937) !important; /* Zurück zur Standard-Hintergrundfarbe */
+            display: flex;
+            flex-direction: column;
+        }
+        
+        /* Wir zwingen nur das iframe, den Platz zu nutzen, lassen Gradios <div>s aber in Ruhe */
+        .vm-wrapper iframe {
+            width: 100% !important;
+            height: 100% !important;
+            border: none !important;
+            display: block !important;
+        }
+        /* Zwingt die Input-Reihe auf eine saubere Linie */
+        .prompt-row {
+            align-items: stretch !important;
+        }
+
+        .fixed-upload {
+            min-height: 160px !important;
+            max-height: 160px !important;
+            background-color: transparent !important;
+        }
+        
+        /* Den grellen, dicken Rahmen des Drop-Bereichs überschreiben */
+        .fixed-upload > .wrap, 
+        .fixed-upload > div {
+            border: 1px dashed #4b5563 !important; /* Dünnes, dezentes Dunkelgrau statt grellem Weiß */
+            border-radius: 8px !important;
+        }
+
+        /* Echter Karten-Look für die Spalten */
+        .upload-card {
+            border: 1px solid var(--border-color-primary, #374151) !important;
+            border-radius: 12px !important;
+            background-color: var(--background-fill-secondary, #1f2937) !important;
+            padding: 15px !important;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Buttons abrunden und Abstand erzwingen */
+        .button-row {
+            gap: 15px !important; /* Echter Abstand ZWISCHEN den Buttons */
+            margin-top: 15px !important; /* Abstand nach oben zur Upload-Box */
+        }
+        
+        .button-row button {
+            border-radius: 8px !important; /* Schöne Rundung für die Buttons */
+        }
         </style>
     """)
     state = gr.State({})
@@ -640,33 +707,37 @@ with gr.Blocks(theme=gr.themes.Default()) as demo:
     with gr.Accordion("File Upload & Management", open=True):
         with gr.Row(equal_height=True): 
             
-            # LINKE SPALTE
-            with gr.Column():
+            # LINKE SPALTE (Allgemeine Dateien & RAG)
+            # NEU: Die Column ist jetzt selbst die Karte. Das 'with gr.Group():' wurde gelöscht!
+            with gr.Column(elem_classes="upload-card"):
                 file_upload = gr.File(
-                    label="Upload Files", 
+                    label="Wissensbasis (RAG) erweitern",
                     file_count="multiple", 
-                    elem_classes="left-upload-area"
+                    elem_classes="fixed-upload"
                 )
-                with gr.Row():
+                # NEU: Wir nutzen die Klasse 'button-row' für Abstände und runde Ecken
+                with gr.Row(elem_classes="button-row"):
                     upload_button = gr.Button("Upload Files", variant="primary")
                     refresh_button = gr.Button("Refresh Files", variant="secondary")
 
-            # RECHTE SPALTE (HIER WIRD DER KILL-SWITCH AKTIVIERT)
-            with gr.Column(elem_classes="no-outer-scroll"):
+            # RECHTE SPALTE (Testanweisungen)
+            # NEU: Auch hier ist die Column die Karte. Das 'with gr.Group():' wurde gelöscht!
+            with gr.Column(elem_classes="upload-card"):
                 instruction_upload = gr.File(
                     label="Anweisung.pdf hochladen", 
                     file_count="single",
-                    type="filepath" 
+                    type="filepath",
+                    elem_classes="fixed-upload"
                 )
                 
                 gr.Markdown("### 📋 Erfasste Testschritte", elem_classes="fixed-header-text")
-                
-                # DIE EINZIGE SCROLLBOX
                 instruction_status = gr.HTML(
                     value='<div class="placeholder-center">Warte auf Anweisungs-PDF...</div>',
                     elem_id="instruction-steps-list",
                     elem_classes="scroll-box"
                 )
+                    
+        # Die untere Zeile (View File) lassen wir unverändert darunter
         with gr.Row():
             view_file_dropdown = gr.Dropdown(
                 label="View File",
@@ -682,7 +753,7 @@ with gr.Blocks(theme=gr.themes.Default()) as demo:
             )
 
     # Prompt Line
-    with gr.Row():
+    with gr.Row(elem_classes="prompt-row", equal_height=True):
         with gr.Column(scale=8):
             chat_input = gr.Textbox(
                 show_label=False, 
@@ -690,23 +761,24 @@ with gr.Blocks(theme=gr.themes.Default()) as demo:
                 container=False
             )
         with gr.Column(scale=1, min_width=50):
-            submit_button = gr.Button(value="Send", variant="primary", elem_classes="primary-button")
+            submit_button = gr.Button(value="Send", variant="primary")
         with gr.Column(scale=1, min_width=50):
-            stop_button = gr.Button(value="Stop", variant="secondary", elem_classes="secondary-button")
+            stop_button = gr.Button(value="Stop", variant="secondary")
+        with gr.Column(scale=1, min_width=50):
+            reset_button = gr.Button(value="Reset", variant="stop")
 
-    # Chat
-    with gr.Row():
+    # Chat und VM bündig machen
+    with gr.Row(equal_height=True):
         with gr.Column(scale=2):
             chatbot = gr.Chatbot(
                 label="Chatbot History", 
                 autoscroll=True, 
                 height=580,
-                avatar_images=("👤", "🤖")
             )
         with gr.Column(scale=3):
             display_area = gr.HTML(
                 get_file_viewer_html(),
-                elem_classes="no-padding"
+                elem_classes="vm-wrapper"
             )
 
     def update_model(model_selection, state):
@@ -766,6 +838,25 @@ with gr.Blocks(theme=gr.themes.Default()) as demo:
         state["tools"] = {}
         state['chatbot_messages'] = []
         return state['chatbot_messages']
+    
+    def do_deep_reset(state):
+        """Löscht den Chat UND setzt den Test-Fortschritt komplett auf 0 zurück."""
+        # 1. Chat löschen
+        state["messages"] = []
+        state["responses"] = {}
+        state["tools"] = {}
+        state['chatbot_messages'] = []
+        
+        # 2. Gedächtnis des Agenten löschen!
+        state['instruction_steps'] = []
+        state['current_step_index'] = 0
+        state['stop'] = False
+        
+        # 3. Kleines Feedback für dich
+        gr.Info("🔄 Deep Reset ausgeführt! Der Agent hat alles vergessen.")
+        
+        # Wir geben den leeren Chat zurück und leeren auch die PDF-Anzeige rechts!
+        return state['chatbot_messages'], '<div class="placeholder-center">Warte auf Anweisungs-PDF...</div>'
 
     def view_file(file_path, view_mode):
         if view_mode == "File Viewer" and file_path:
@@ -793,6 +884,13 @@ with gr.Blocks(theme=gr.themes.Default()) as demo:
 
     def handle_instruction_upload(file_path, state, progress=gr.Progress()):
         if not file_path:
+            # --- START NEU: DATEN WIRKLICH LÖSCHEN ---
+            state["instruction_steps"] = []
+            state["current_step_index"] = 0
+            if "program_name" in state:
+                state["program_name"] = None
+            print("🗑️ PDF entfernt: Instruktionen aus dem Speicher gelöscht.")
+            # --- ENDE NEU ---
             return state, '<div class="placeholder-center">Warte auf Anweisungs-PDF...</div>'
         
         try:
@@ -875,6 +973,12 @@ with gr.Blocks(theme=gr.themes.Default()) as demo:
     
     submit_button.click(process_input, [chat_input, state], [chatbot, view_file_dropdown])
     stop_button.click(stop_app, [state], None)
+
+    reset_button.click(
+        fn=do_deep_reset,
+        inputs=[state],
+        outputs=[chatbot, instruction_status]
+    )
     
     view_toggle.change(
         fn=toggle_view, 

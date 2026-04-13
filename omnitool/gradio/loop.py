@@ -47,15 +47,15 @@ PROVIDER_TO_DEFAULT_MODEL_NAME: dict[APIProvider, str] = {
 }
 
 
-def wait_for_ui_change(vm_url, timeout=30, sensitivity_threshold=0.5):
+def wait_for_ui_change(vm_url, timeout=45, sensitivity_threshold=5.0):
     """
-    Holt im Sekundentakt Screenshots direkt von der VM und bricht ab,
-    sobald eine signifikante optische Änderung erkannt wurde.
+    Zwei-Phasen-Wächter: Wartet zuerst auf eine Änderung (Popup) und 
+    danach auf eine Stabilität des Bildschirms (Fertig geladen).
     """
-    print(f"👀 Starte dynamische UI-Beobachtung (max {timeout}s)...")
+    print(f"👀 Starte smarten Zwei-Phasen-Wächter (max {timeout}s)...")
     
     try:
-        # 1. Baseline Screenshot holen
+        # Baseline = Der nackte Desktop im Moment des Klicks
         resp = requests.get(f"http://{vm_url}/screenshot", timeout=5)
         baseline_img = Image.open(io.BytesIO(resp.content)).convert('RGB')
     except Exception as e:
@@ -64,35 +64,64 @@ def wait_for_ui_change(vm_url, timeout=30, sensitivity_threshold=0.5):
         return
 
     start_time = time.time()
+    phase = 1 # 1 = Warten auf erste Änderung (Popup), 2 = Warten auf ruhiges Bild (Fertig)
+    stable_count = 0
+    last_img = baseline_img
     
     while time.time() - start_time < timeout:
-        time.sleep(1.5) # Kurze Pause zwischen den Checks
+        time.sleep(2.0) # 2 Sekunden Takt, um Flackern zu überbrücken
         
         try:
-            # 2. Neuen Screenshot holen
             resp = requests.get(f"http://{vm_url}/screenshot", timeout=5)
             current_img = Image.open(io.BytesIO(resp.content)).convert('RGB')
             
-            # 3. Maskieren der Taskleiste (wie in deiner alten Logik)
             width, height = baseline_img.size
             draw_base = ImageDraw.Draw(baseline_img)
             draw_curr = ImageDraw.Draw(current_img)
+            draw_last = ImageDraw.Draw(last_img)
+            
+            # Taskleiste schwärzen
             draw_base.rectangle([0, height - 40, width, height], fill="black")
             draw_curr.rectangle([0, height - 40, width, height], fill="black")
+            draw_last.rectangle([0, height - 40, width, height], fill="black")
 
-            # 4. Differenz berechnen
-            diff = ImageChops.difference(baseline_img, current_img)
-            stat = ImageStat.Stat(diff.convert('L'))
-            diff_ratio = (stat.mean[0] / 255) * 100
+            # Diff zur Baseline (Wie stark weicht es vom originalen Desktop ab?)
+            diff_baseline = ImageChops.difference(baseline_img, current_img)
+            stat_baseline = ImageStat.Stat(diff_baseline.convert('L'))
+            ratio_baseline = (stat_baseline.mean[0] / 255) * 100
             
-            if diff_ratio > sensitivity_threshold:
-                print(f"✨ UI-Änderung erkannt ({diff_ratio:.3f}%) nach {int(time.time() - start_time)}s! Setze Testlauf fort.")
-                # Extra-Puffer, damit Fenster fertig rendern können
-                time.sleep(2) 
-                return
-            else:
-                print(f"⏳ Lade... (Änderung: {diff_ratio:.3f}%)")
+            if phase == 1:
+                if ratio_baseline > sensitivity_threshold:
+                    print(f"✨ Ladebildschirm/Popup erkannt ({ratio_baseline:.2f}%). Wechsle in Stabilitäts-Check...")
+                    phase = 2
+                    stable_count = 0
+                else:
+                    print(f"⏳ Warte auf Programmstart... (Änderung zum Desktop: {ratio_baseline:.2f}%)")
+                    
+            elif phase == 2:
+                # Diff zum VORHERIGEN Frame (Bewegt sich gerade noch was?)
+                diff_consecutive = ImageChops.difference(last_img, current_img)
+                stat_consecutive = ImageStat.Stat(diff_consecutive.convert('L'))
+                ratio_consecutive = (stat_consecutive.mean[0] / 255) * 100
                 
+                if ratio_consecutive < 0.5: # Kaum Änderungen = Das Bild steht still
+                    # ANTI-DESKTOP-TRICK: Ist es wirklich die App oder nur wieder der leere Desktop?
+                    if ratio_baseline > 3.0: 
+                        stable_count += 1
+                        print(f"🛑 Bild ist stabil ({stable_count}/2).")
+                        if stable_count >= 2: # 2 mal hintereinander stabil (ca. 4 Sekunden Stillstand)
+                            print("✅ Programm ist vollständig geladen und Einsatzbereit!")
+                            time.sleep(1) # Kurzer Sicherheitspuffer
+                            return
+                    else:
+                        print("⚠️ Bild ist stabil, sieht aber wieder aus wie der Desktop. Popup hat sich geschlossen. Warte auf Hauptfenster...")
+                        stable_count = 0 # Counter resetten
+                else:
+                    print(f"⏳ Programm lädt noch / Animationen laufen (Bewegung: {ratio_consecutive:.2f}%)")
+                    stable_count = 0
+                    
+            last_img = current_img.copy()
+            
         except Exception as e:
             print(f"Fehler beim dynamischen Polling: {e}")
             pass
@@ -113,7 +142,8 @@ def sampling_loop_sync(
     omniparser_url: str,
     save_folder: str = "./uploads",
     instruction_steps = [],
-    current_step_index = 0
+    current_step_index = 0,
+    windows_agent_url: str = "127.0.0.1:5055"  # <--- NEU: Standardwert für lokales Testen
 ):
     print(f"DEBUG-START: Das gewählte Modell ist: '{model}'")
     """
@@ -186,7 +216,60 @@ def sampling_loop_sync(
         from executor.openai_executor import OpenAIExecutor
         openai_executor = OpenAIExecutor(output_callback, tool_output_callback)
 
+        last_raw_img = None
+        skip_counter = 0
+        MAX_SKIPS = 5
+
         while True:
+            # Frame Skipping Definition
+            try:
+                # 1. Superschneller lokaler Screenshot (Dauert nur wenige Millisekunden)
+                resp = requests.get(f"http://{windows_agent_url}/screenshot", timeout=5)
+                current_raw_img = Image.open(io.BytesIO(resp.content)).convert('RGB')
+                
+                if last_raw_img is not None:
+                    width, height = last_raw_img.size
+                    draw_last = ImageDraw.Draw(last_raw_img)
+                    draw_curr = ImageDraw.Draw(current_raw_img)
+                    
+                    # Taskleiste ausblenden (verhindert falsche Skips durch blinkende Uhr)
+                    draw_last.rectangle([0, height - 40, width, height], fill="black")
+                    draw_curr.rectangle([0, height - 40, width, height], fill="black")
+                    
+                    diff = ImageChops.difference(last_raw_img, current_raw_img)
+                    stat = ImageStat.Stat(diff.convert('L'))
+                    diff_ratio = (stat.mean[0] / 255) * 100
+                    
+                    # Wenn sich fast nichts geändert hat (< 0.1% der Pixel)
+                    if diff_ratio < 0.1: 
+                        skip_counter += 1
+                        if skip_counter <= MAX_SKIPS:
+                            print(f"💨 Fast-Skip ({skip_counter}/{MAX_SKIPS}): Keine UI-Änderung. Warte 1.5s...")
+                            time.sleep(1.5)
+                            continue # Bricht diesen Durchlauf ab und fängt die while-Schleife von vorne an!
+                        else:
+                            print(f"⚠️ Max Skips ({MAX_SKIPS}) erreicht. Erzwinge LLM-Analyse (Klick ging evtl. ins Leere).")
+                            messages.append({
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "text", 
+                                        "text": "WARNUNG: Dein letzter Klick hat absolut nichts auf dem Bildschirm verändert. "
+                                                "Hast du versehentlich auf einen AUSGEGRAUTEN (inaktiven) Button geklickt oder ein leeres Feld getroffen? "
+                                                "Analysiere das Bild genau! Fülle erst fehlende Felder aus, bevor du es erneut versuchst."
+                                    }
+                                ]
+                            })
+                    
+                    # Reset counter, wenn sich das Bild ändert oder wir das Limit erreicht haben
+                    skip_counter = 0
+                        
+                # Aktuelles Bild für den nächsten Loop merken
+                last_raw_img = current_raw_img.copy()
+
+            except Exception as e:
+                print(f"⚠️ Fast-Skip Fehler: {e}. Mache normal weiter.")
+                
             # A. Screenshot machen und durch OmniParser analysieren lassen
             parsed_screen = omniparser_client()
 

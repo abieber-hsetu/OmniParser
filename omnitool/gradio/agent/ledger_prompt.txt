@@ -31,6 +31,9 @@ DO NOT wait for the Global Goal to be finished. We evaluate step-by-step. If THI
 ANTI-GUESSING RULE (OBSERVE FIRST):
 If the Agent performs random clicks on unrelated elements, or if it seems lost on a newly loaded page, set "is_progress_being_made" to 'false'. Command the Agent strictly to STOP clicking and to use the 'verify' action first to properly analyze the current screen before taking any further physical actions
 
+CRITICAL OUTPUT RULE:
+Output ONLY the raw, valid JSON object. Do NOT wrap it in Markdown formatting like ```json. Do NOT include any greetings, explanations, or text outside the JSON block. Start immediately with {{ and end with }}.
+
 OUTPUT FORMAT (STRICT JSON):
 CRITICAL: Keep all "reason" fields under 10 words!
 Output ONLY the following JSON. Do not deviate from this schema:

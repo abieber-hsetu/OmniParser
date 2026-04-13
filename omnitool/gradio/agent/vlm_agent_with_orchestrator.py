@@ -20,6 +20,7 @@ import os
 from rag_manager import HsetuRagManager
 import hashlib
 import io
+import shutil
 
 def extract_data(input_string, data_type):
     # 1. Versuch: Standard-Markdown Extraktion (```json ... ```)
@@ -196,7 +197,18 @@ class VLMOrchestratedAgent:
         return current_step_cost
 
     def set_instructions(self, steps, program_name=None):
-        self.instruction_steps = steps
+        final_summary_step = (
+            "FINALER BERICHT: Die eigentliche Aufgabe ist abgeschlossen. Klicke nichts mehr an! "
+            "Erstelle ein abschließendes Gutachten basierend auf dem finalen Bild und deinem bisherigen Klick-Verlauf:\n"
+            "1. ERGEBNIS: Ist das Endziel erreicht (z.B. sichtbare Erfolgsmeldung, neuer Status)?\n"
+            "2. UX-BEWERTUNG (Benutzerfreundlichkeit): Wie bewertest du das Design dieses Bildschirms? "
+            "Ist die Oberfläche übersichtlich oder überladen? Heben sich wichtige Buttons farblich gut ab? "
+            "Ist das visuelle Feedback für den Nutzer eindeutig?\n"
+            "WICHTIG: Du bist weiterhin eine Maschine! Deine Antwort MUSS ein gültiges JSON-Objekt bleiben. "
+            "Schreibe deinen gesamten Bericht ausschließlich in das 'Reasoning'-Feld deines JSON und beende den Text dort mit SCHRITT_ABGESCHLOSSEN. "
+            "Beispiel: {\"Action\": \"done\", \"Reasoning\": \"Dein langer UX-Bericht... SCHRITT_ABGESCHLOSSEN\"}"
+        )
+        self.instruction_steps = steps + [final_summary_step]
         self.current_step_index = 0
         self.pdf_program_name = program_name
 
@@ -230,20 +242,31 @@ class VLMOrchestratedAgent:
         sync_screen_info_str = parsed_screen.get("screen_info", "")
         all_screen_text = sync_screen_info_str.lower()
         current_program = "Unknown"
+        self.step_advanced_by_ledger = False
 
-        # --- NEU: POPUP DIREKT ABFANGEN (SPART TOKENS) ---
-        # --- NEU: POPUP DIREKT ABFANGEN (SPART TOKENS) ---
-        if "systemcheck is running" in all_screen_text or "systemcheck" in all_screen_text:
-            print("🛑 Lade-Popup 'SystemCheck' erkannt! Warte 5 Sekunden...")
+        # --- START NEU: LOKALER LADE-BLOCKER (SPART MASSIV TOKENS) ---
+        # Hier trägst du alle Wörter ein, die in deiner Software auf einen Ladevorgang hindeuten
+        loading_keywords = [
+            "systemcheck is running", 
+            "bitte warten", 
+            "daten werden importiert", 
+            "wird geladen",
+            "reagiert nicht" 
+        ]
+        
+        # Wir prüfen, ob eines der Lade-Wörter auf dem aktuellen Screenshot steht
+        if any(keyword in all_screen_text for keyword in loading_keywords):
+            print("🛑 LOKALER BLOCKER: Ladebildschirm durch OmniParser erkannt! Schone das LLM und warte 10 Sekunden...")
             
+            # Wir faken die Antwort des LLMs für den Orchestrator
             dummy_json = {
                 "Action": "wait", 
-                "Reasoning": "Das Lade-Popup 'SystemCheck' ist sichtbar. Ich warte auf das Hauptfenster.",
-                "post_action_wait": 5 # Kurzer Check im 5-Sekunden-Takt
+                "Reasoning": "Lokaler Python-Blocker hat einen Ladebildschirm erkannt. LLM wurde übersprungen, um Kosten zu sparen.",
+                "post_action_wait": 10 # Prüft in 10 Sekunden erneut, ob der Text noch da ist
             }
             
             response_content = [
-                BetaTextBlock(text="Reasoning: Loading popup detected. Waiting for main GUI...", type='text'),
+                BetaTextBlock(text="Reasoning: Local OCR detected loading state. Waiting without LLM call...", type='text'),
                 BetaToolUseBlock(
                     id=f'toolu_{uuid.uuid4()}', 
                     input={'action': 'wait'}, 
@@ -260,8 +283,9 @@ class VLMOrchestratedAgent:
                 stop_reason='tool_use',
                 usage=BetaUsage(input_tokens=0, output_tokens=0)
             )
+            # Wir brechen HIER ab. Das echte LLM wird für diesen Frame gar nicht erst aufgerufen!
             return dummy_message, dummy_json
-        # --- ENDE POPUP ABFANGEN ---
+        # --- ENDE NEU: LOKALER LADE-BLOCKER ---
 
         # Screenshot related vars
         screenshot_uuid = parsed_screen['screenshot_uuid']
@@ -306,6 +330,7 @@ class VLMOrchestratedAgent:
                     # Der LLM-Ledger sagt: Der aktuelle Schritt ist fertig!
                     if self.current_step_index < (total_steps - 1):
                         self.current_step_index += 1
+                        self.step_advanced_by_ledger = True
                         current_step_num = self.current_step_index + 1
                         print(f"✅ Schritt {current_step_num - 1} abgeschlossen! Wechsle zu Schritt {current_step_num}/{total_steps}.")
                         
@@ -410,9 +435,11 @@ class VLMOrchestratedAgent:
                 {current_instruction}
 
                 ### ⚠️ TECHNISCHE PROTOKOLL-REGELN:
-                1. Analysiere den Screenshot: Ist das ZIEL der Aufgabe bereits erreicht (z.B. das Programmfenster ist bereits vollständig geöffnet und sichtbar)? Wenn ja, klicke NICHT erneut, sondern beende den Schritt!
+                1. Analysiere den Screenshot: Ist das ZIEL der Aufgabe bereits erreicht? Wenn ja, klicke NICHT erneut, sondern beende den Schritt!
                 2. Wenn das Ziel erreicht ist, schreibe zwingend das Codewort **SCHRITT_ABGESCHLOSSEN** ans Ende deines Reasonings.
-                3. Wenn die Aufgabe noch nicht sichtbar ist, führe die nächsten notwendigen Klicks/Eingaben aus.
+                3. APP STARTEN: Um ein Programm zu öffnen, nutze NIEMALS "double_click"! Nutze IMMER den Befehl {{"Action": "openApp", "Text_content": "Name des Programms"}}. WICHTIG: Ersetze "Name des Programms" durch den echten Namen (z.B. "Excel", "Notepad" oder "Hott-Therm").
+                4. IMPORT & LADEZEITEN: Wenn du ein Projekt importierst, eine Datei lädst oder einen Ladescreen siehst, nutze zwingend den Befehl {{"Action": "wait_for_app"}}. Das gibt dem System Zeit, die Daten zu verarbeiten, ohne dass du weiterklickst.
+                5. INAKTIVE BUTTONS: Der OmniParser erkennt NICHT, ob ein Button ausgegraut (disabled) ist. Du MUSST zwingend das Originalbild prüfen! Wenn ein Button blass, grau oder visuell inaktiv ist, darfst du ihn NIEMALS anklicken! Überlege stattdessen, was auf dem Bildschirm noch fehlt (z.B. ein Pflichtfeld ausfüllen), damit der Button aktiv wird.
                 """
         else:
             search_query = self._task if hasattr(self, '_task') else "Nächster Schritt"
@@ -513,6 +540,7 @@ class VLMOrchestratedAgent:
             action = vlm_response_json.get('Action', '').lower()
             box_id_val = vlm_response_json.get("Box_ID", vlm_response_json.get("Box ID"))
             
+            # Label des geklickten Elements sicher auslesen
             clicked_label = ""
             if box_id_val is not None and content_list:
                 raw_el = content_list.get(str(box_id_val))
@@ -520,70 +548,139 @@ class VLMOrchestratedAgent:
                     clicked_label = str(raw_el[1]).lower()
                 elif isinstance(raw_el, dict):
                     clicked_label = raw_el.get('content', '').lower()
-
-            # 2. Reasoning und eventuell getippten Text auslesen
-            reasoning_text = str(vlm_response_json.get("Reasoning", "")).lower()
-            typed_text = str(vlm_response_json.get("Text_content", vlm_response_json.get("value", ""))).lower()
-            
-            # --- START: GLOBALE PROGRAMMSTART-ERKENNUNG ---
-            is_program_launch = False
-            
-            # Wir prüfen ALLE Aktionen, die das Programm starten könnten
-            if action in ["double_click", "left_click", "type"]:
-                
-                # Hat die Aktion optisch oder inhaltlich mit unserem Programm zu tun?
-                interacts_with_program = any(w in clicked_label for w in ["hott", "therm", "cad"]) or \
-                                         any(w in typed_text for w in ["hott", "therm", "cad"])
-                
-                # Will er es wirklich STARTEN? (Unterscheidet Start-Versuche von normalen Klicks im laufenden Programm)
-                intends_to_open = any(w in reasoning_text for w in ["start", "open", "öffne", "search", "suche", "shortcut", "icon", "run"])
-                
-                # Fallback: Wenn er "Hott" tippt (type), will er es zu 99% über die Windows-Suche öffnen
-                if interacts_with_program and (intends_to_open or action == "type"):
-                    is_program_launch = True
-
-            if is_program_launch:
-                if "app_launched" in self.launched_programs:
-                    print(f"🛡️ BLOCKIERT: Agent wollte das Programm ein zweites Mal über '{action}' starten!")
                     
-                    # Aktion hart auf "wait" überschreiben
+            # --- START: PYTHON-BLOCKER (Friert das LLM ein, bis die App offen ist) ---
+            is_app_launch = False
+            
+            if action == "double_click":
+                is_app_launch = True
+            elif action == "left_click" and any(w in clicked_label for w in ["hott", "therm", "cad"]):
+                is_app_launch = True
+
+            # 1. Der Warten-Befehl (für App-Starts UND Projekt-Imports!)
+            if action == "wait_for_app":
+                print("🧠 LLM-BEFEHL: Agent wartet bewusst auf Ladevorgang/Import!")
+                vlm_response_json["Action"] = "wait"
+                if "Next Action" in vlm_response_json: vlm_response_json["Next Action"] = "wait"
+                vlm_response_json["post_action_wait"] = 50 # Startet den Zwei-Phasen-Wächter in loop.py
+                
+            # 2. NEU: Der openApp-Befehl
+            elif action == "openapp":
+                app_name = str(vlm_response_json.get("Text_content", 
+                           vlm_response_json.get("text_content", 
+                           vlm_response_json.get("value", 
+                           vlm_response_json.get("Program", 
+                           vlm_response_json.get("App_Name", 
+                           vlm_response_json.get("App", "")))))))
+                
+                if app_name.lower() in ["app", "name des programms", "none", "", "null"]:
+                    app_name = self._task.split()[1] if hasattr(self, '_task') and len(self._task.split()) > 1 else "Hott-Therm"
+                
+                clean_app_name = app_name.replace('-', ' ').replace('_', ' ').strip().lower()
+
+                # --- START NEU: DAS GEDÄCHTNIS ---
+                if clean_app_name in self.launched_programs:
+                    print(f"🛡️ PYTHON-BLOCKER: LLM wollte '{clean_app_name}' nochmal öffnen. Wird blockiert! Warte stattdessen auf das Laden...")
+                    
+                    # Wir verwandeln den Klick heimlich in ein bloßes "Warten"
                     vlm_response_json["Action"] = "wait"
-                    if "Next Action" in vlm_response_json:
-                        vlm_response_json["Next Action"] = "wait"
-                    vlm_response_json["post_action_wait"] = 5
-                    
-                    # Systemwarnung in den Chatverlauf schießen
-                    messages.append({
-                        "role": "user",
-                        "content": "SYSTEM OVERRIDE: Your action was BLOCKED. You already launched the application! It is currently loading in the background. DO NOT try to open it again via search, start menu, or desktop shortcut. Look for a loading popup or wait for the main window to appear."
-                    })
+                    if "Next Action" in vlm_response_json: vlm_response_json["Next Action"] = "wait"
+                    vlm_response_json["post_action_wait"] = 30  # Dem LLM nochmal 30s Ladezeit aufzwingen
                 else:
-                    print(f"🚩 SIGNAL: Erster Programmstart registriert (via {action})!")
-                    self.launched_programs.add("app_launched")
-                    vlm_response_json["post_action_wait"] = 8
-            else:
-                # Standard Wartezeit für alle normalen Klicks, die kein Start sind
-                vlm_response_json["post_action_wait"] = 2
+                    print(f"🚀 LLM-BEFEHL: Agent öffnet App '{clean_app_name}' direkt über openApp-Makro!")
+                    self.launched_programs.add(clean_app_name) # App ins Gedächtnis eintragen!
+                    
+                    vlm_response_json["Action"] = "openapp"
+                    if "Next Action" in vlm_response_json: vlm_response_json["Next Action"] = "openapp"
+                    
+                    # Timeout gefahrlos auf 180s (3 Min) hochschrauben! 
+                    # Da loop.py dynamisch überwacht, bricht die Pause exakt in der Sekunde ab, in der die GUI da ist.
+                    vlm_response_json["post_action_wait"] = 180
+            # --- ENDE: PYTHON-BLOCKER ---
         
         # --- HIER STARTET DER NEUE BULLET-PROOF BLOCK ---
         next_action = vlm_response_json.get("Action", vlm_response_json.get("Next Action", "None"))
         reasoning_str = str(vlm_response_json.get("Reasoning", "")).upper()
         action_str = str(next_action).upper()
         
-        # Wenn der Agent das Wort SCHRITT_ABGESCHLOSSEN nutzt, erhöhen wir SOFORT den Schritt!
-        if "SCHRITT_ABGESCHLOSSEN" in reasoning_str or "SCHRITT_ABGESCHLOSSEN" in action_str or "COMPLETION" in action_str:
-            print(f"🚀 AGENT-SIGNAL: Agent meldet Schritt {self.current_step_index + 1} als beendet!")
+        # Wurde der Schritt vom VLM als fertig markiert?
+        is_vlm_finished = "SCHRITT_ABGESCHLOSSEN" in reasoning_str or "SCHRITT_ABGESCHLOSSEN" in action_str or "COMPLETION" in action_str
+        
+        if is_vlm_finished or self.step_advanced_by_ledger:
+            print(f"🚀 AGENT-SIGNAL: Schritt als beendet markiert!")
             total_steps = len(self.instruction_steps)
             
-            if self.current_step_index < (total_steps - 1):
+            # --- START NEU: ERGEBNIS-SCREENSHOT FÜR DIESEN SCHRITT SPEICHERN ---
+            
+            # 1. Einen "results"-Ordner im aktuellen Test-Verzeichnis erstellen (falls er nicht existiert)
+            results_dir = os.path.join(self.save_folder, "results")
+            os.makedirs(results_dir, exist_ok=True)
+            
+            # 2. Den Namen aus der aktuellen Schrittnummer bauen (bevor der Zähler gleich erhöht wird!)
+            completed_step_num = self.current_step_index + 1
+            step_result_path = os.path.join(results_dir, f"Schritt_{completed_step_num}_Ergebnis.png")
+            
+            try:
+                # 3. Das saubere Originalbild ohne die OmniParser-Markierungen kopieren
+                shutil.copy(screenshot_path, step_result_path)
+                print(f"📸 Beweisfoto für Schritt {completed_step_num} erfolgreich gesichert!")
+            except Exception as e:
+                print(f"⚠️ Konnte Ergebnis-Screenshot nicht speichern: {e}")
+            # --- ENDE NEU ---
+
+            
+            # 1. Double-Increment-Schutz: Nur erhöhen, wenn der Ledger es nicht schon getan hat!
+            if is_vlm_finished and not getattr(self, 'step_advanced_by_ledger', False):
                 self.current_step_index += 1
-                print(f"✅ Wechsle sofort zu Schritt {self.current_step_index + 1}/{total_steps}.")
-                next_action = "wait"
-                vlm_response_json["Action"] = "wait"
-            else:
+            
+            # 2. Prüfen, ob wir das Ende erreicht haben
+            if self.current_step_index >= total_steps:
                 print(f"🎉 Alle {total_steps} Schritte abgeschlossen! Testlauf beendet.")
                 next_action = "finished"
                 vlm_response_json["Action"] = "finished"
+
+                if self.output_callback:
+                    self.output_callback(
+                        f'<div style="padding: 15px; background-color: #d1fae5 !important; border-left: 5px solid #10b981 !important; border-radius: 8px; font-family: sans-serif; margin-top: 15px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">'
+                        f'  <h3 style="margin-top: 0; margin-bottom: 10px; color: #064e3b !important;">🏁 Durchlauf abgeschlossen!</h3>'
+                        f'  <p style="margin: 5px 0; color: #065f46 !important;">Alle <b style="color: #064e3b !important;">{total_steps}</b> Schritte der Anweisung wurden erfolgreich abgearbeitet.</p>'
+                        f'  <hr style="border: 0; border-top: 2px solid #a7f3d0 !important; margin: 10px 0;">'
+                        f'  <p style="margin: 5px 0; color: #065f46 !important;">💸 <b style="color: #064e3b !important;">Gesamtkosten:</b> ${self.total_cost:.4f}</p>'
+                        f'  <p style="margin: 5px 0; color: #065f46 !important;">📊 <b style="color: #064e3b !important;">Gesamt-Tokens verbraucht:</b> {self.total_token_usage}</p>'
+                        f'</div>'
+                    )
+                
+                final_summary = vlm_response_json.get("Reasoning", "Keine Zusammenfassung generiert.")
+                report_path = os.path.join(self.save_folder, "FINAL_REPORT.txt")
+                with open(report_path, "w", encoding="utf-8") as f:
+                    f.write("="*50 + "\n")
+                    f.write(f"✅ TESTLAUF BEENDET: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"📁 Aufgabe: {getattr(self, '_task', 'Unbekannt')}\n")
+                    f.write("="*50 + "\n\n")
+                    f.write("🤖 GUTACHTEN DES LLM (Sichtbarkeit & Ergebnis):\n")
+                    f.write("-" * 50 + "\n")
+                    f.write(final_summary + "\n")
+                
+                final_image_path = os.path.join(self.save_folder, "FINAL_RESULT_SCREENSHOT.png")
+                try:
+                    shutil.copy(screenshot_path, final_image_path)
+                except Exception as e:
+                    pass
+                
+            else:
+                # 3. Der echte Fast-Forward für den nächsten Schritt
+                if next_action.lower() in ["wait", "none", "check", "verify", "done"]:
+                    print(f"⚡ FAST-FORWARD: Überspringe Screenshot! Starte Schritt {self.current_step_index + 1} auf aktuellem Bild.")
+                    
+                    # WICHTIG: Die letzte "assistant"-Nachricht (der Ledger) aus der Historie entfernen,
+                    # sonst crasht die API wegen "zwei Assistant-Nachrichten nacheinander"!
+                    if len(messages) > 0 and messages[-1].get("role") == "assistant":
+                        messages.pop()
+                        
+                    # REKURSION: Die Funktion ruft sich selbst auf und verarbeitet den neuen Schritt sofort!
+                    return self.__call__(messages, parsed_screen)
+                else:
+                    print(f"⚠️ Agent hat noch geklickt ('{next_action}'). Klick wird ausgeführt, danach normales neues Bild.")
         # --- ENDE DES BULLET-PROOF BLOCKS ---
 
         # 10. Koordinatenberechnung und Visualisierung
@@ -592,7 +689,7 @@ class VLMOrchestratedAgent:
         # FIX: Unterstütze beide Schreibweisen aus Prompt ("Box_ID") und Skript ("Box ID")
         box_id_val = vlm_response_json.get("Box_ID", vlm_response_json.get("Box ID"))
         
-        if box_id_val is not None:
+        if box_id_val is not None and str(box_id_val).lower() not in ["none", "null", "", "na"]:
             try:
                 # FIX: OmniParser liefert Boxen oft als Dictionary mit String-Keys (z.B. "3" statt 3)
                 target_item = None
@@ -683,10 +780,66 @@ class VLMOrchestratedAgent:
                 name='computer', type='tool_use'))
 
         if next_action == "type":
+            raw_text = str(vlm_response_json.get("Text_content", vlm_response_json.get("value", "")))
+            safe_text = raw_text.replace('\n', '').replace('\r', '')
+            
+            # 1. Klick ins Feld (Fokus sicher setzen)
+            if 'box_centroid_coordinate' in vlm_response_json:
+                response_content.append(BetaToolUseBlock(
+                    id=f'toolu_{uuid.uuid4()}',
+                    input={'action': 'left_click', 'coordinate': vlm_response_json["box_centroid_coordinate"]},
+                    name='computer', type='tool_use'))
+            
+            # 2. Feld leeren (Strg+A -> Backspace), um Endlos-Anhänge zu verhindern
+            response_content.append(BetaToolUseBlock(
+                id=f'toolu_{uuid.uuid4()}', input={'action': 'key', 'text': 'ctrl+a'}, name='computer', type='tool_use'))
+            response_content.append(BetaToolUseBlock(
+                id=f'toolu_{uuid.uuid4()}', input={'action': 'key', 'text': 'backspace'}, name='computer', type='tool_use'))
+
+            is_search = vlm_response_json.get("Submit_Search", False) or vlm_response_json.get("submit_search", False)
+            
+            if is_search:
+                print(f"⚡ TURBO-SUCHE AKTIVIERT: Jage Text '{safe_text}' rein!")
+                response_content.append(BetaToolUseBlock(
+                    id=f'toolu_{uuid.uuid4()}', input={'action': 'type', 'text': safe_text}, name='computer', type='tool_use'))
+                response_content.append(BetaToolUseBlock(
+                    id=f'toolu_{uuid.uuid4()}', input={'action': 'key', 'text': 'enter'}, name='computer', type='tool_use'))
+                vlm_response_json["post_action_wait"] = 3
+                
+            else:
+                # DAS NORMALE, SICHERE FORMULAR-TIPPEN
+                print(f"⌨️ DEBUG: Smart-Type für Text: '{safe_text}'")
+                for char in safe_text:
+                    key_text = "space" if char == " " else char
+                    response_content.append(BetaToolUseBlock(
+                        id=f'toolu_{uuid.uuid4()}', input={'action': 'key', 'text': key_text}, name='computer', type='tool_use'))
+                        
+                # 3. ZWINGENDER ABSCHLUSS: Enter oder Tab!
+                if vlm_response_json.get("Press_Tab", False) or vlm_response_json.get("press_tab", False):
+                    print("➡️ LLM hat 'Press_Tab' aktiviert! Hänge automatisches 'Tab' an.")
+                    response_content.append(BetaToolUseBlock(
+                        id=f'toolu_{uuid.uuid4()}', input={'action': 'key', 'text': 'tab'}, name='computer', type='tool_use'))
+                else:
+                    # Der Game-Changer für Windows-Dialoge:
+                    print("➡️ Standard-Abschluss: Hänge 'Enter' an, um Dialogfenster/Formulare sofort zu bestätigen!")
+                    response_content.append(BetaToolUseBlock(
+                        id=f'toolu_{uuid.uuid4()}', input={'action': 'key', 'text': 'enter'}, name='computer', type='tool_use'))
+                
+                # Kurze Pause geben, damit das Fenster Zeit hat, sich zu schließen
+                vlm_response_json["post_action_wait"] = 2
+
+        elif next_action.lower() in ["key", "key_combination", "press", "hotkey", "shortcut"]:
+            # LLMs stecken den Key mal in Text_content, mal in value, mal in Key
+            key_text = str(vlm_response_json.get("Text_content", 
+                           vlm_response_json.get("value", 
+                           vlm_response_json.get("Key", ""))))
+            
+            # PyAutoGUI/Anthropic mag "Down" statt "Arrow Down"
+            key_text = key_text.replace("Arrow ", "").replace("arrow ", "")
+            
             response_content.append(BetaToolUseBlock(
                 id=f'toolu_{uuid.uuid4()}',
-                # FIX: Unterstütze "Text_content" (Prompt) und "value" (Skript)
-                input={'action': 'type', 'text': vlm_response_json.get("Text_content", vlm_response_json.get("value", ""))},
+                input={'action': 'key', 'text': key_text},
                 name='computer', type='tool_use'))
 
         elif next_action.lower() in ["none", "wait", "verify", "check", "observe", "done", "validate_step", "validate", "verify_completion", "analyze"]:
@@ -694,6 +847,50 @@ class VLMOrchestratedAgent:
                 id=f'toolu_{uuid.uuid4()}',
                 input={'action': 'wait'},
                 name='computer', type='tool_use'))
+
+        elif next_action.lower() == "openapp":
+            raw_app_name = str(vlm_response_json.get("Text_content", 
+                           vlm_response_json.get("text_content", 
+                           vlm_response_json.get("value", 
+                           vlm_response_json.get("Program", 
+                           vlm_response_json.get("App_Name", 
+                           vlm_response_json.get("App", "")))))))
+            
+            if raw_app_name.lower() in ["app", "name des programms", "none", "", "null"]:
+                raw_app_name = self._task.split()[1] if hasattr(self, '_task') and len(self._task.split()) > 1 else "Hott-Therm"
+                
+            clean_app_name = raw_app_name.replace('-', ' ').replace('_', ' ').strip()
+            
+            print("\n" + "="*70)
+            print(f"🕵️‍♂️ DEBUG-MAKRO: Der ultimative openApp-Fix startet!")
+            print(f"   📥 App-Name: '{clean_app_name}'")
+            print("="*70)
+                
+            # 1. Windows-Suche SICHER öffnen (Der Key heißt "super+s", nicht "win"!)
+            response_content.append(BetaToolUseBlock(
+                id=f'toolu_{uuid.uuid4()}', input={'action': 'key', 'text': 'super+s'}, name='computer', type='tool_use'))
+            
+            # 2. Warten (4 Sekunden, um VMs Zeit zu geben)
+            for _ in range(4):
+                response_content.append(BetaToolUseBlock(
+                    id=f'toolu_{uuid.uuid4()}', input={'action': 'wait'}, name='computer', type='tool_use'))
+            
+            # 3. TIPPEN ALS "KEY" (Umgeht den versteckten Enter-Bug des type-Befehls!)
+            for char in clean_app_name.lower():
+                # Ein Leerzeichen muss als das Wort "space" gesendet werden
+                key_text = "space" if char == " " else char
+                
+                response_content.append(BetaToolUseBlock(
+                    id=f'toolu_{uuid.uuid4()}', input={'action': 'key', 'text': key_text}, name='computer', type='tool_use'))
+            
+            # 4. Warten auf Suchergebnisse (4 Sekunden)
+            for _ in range(4):
+                response_content.append(BetaToolUseBlock(
+                    id=f'toolu_{uuid.uuid4()}', input={'action': 'wait'}, name='computer', type='tool_use'))
+            
+            # 5. Abschließendes Enter drücken (Startet das tatsächliche Programm)
+            response_content.append(BetaToolUseBlock(
+                id=f'toolu_{uuid.uuid4()}', input={'action': 'key', 'text': 'enter'}, name='computer', type='tool_use'))
                 
         else:
             # FIX: Hänge die Koordinaten zwingend an den tatsächlichen Klick-Befehl an!
@@ -798,18 +995,31 @@ class VLMOrchestratedAgent:
 
         # 4. Alles in das Template einsetzen
         try:
-            return template.format(
-                screen_info=screen_info,
-                instruction_block=current_step,
-                rag_block=rag_text
-            )
+            safe_template = template
+            safe_template = safe_template.replace("{screen_info}", screen_info)
+            safe_template = safe_template.replace("{instruction_block}", current_step)
+            safe_template = safe_template.replace("{rag_block}", rag_text)
+            
+            return safe_template
         except Exception as e:
             print(f"⚠️ Fehler beim Formatieren: {e}")
             return template # Fallback auf Roh-Template
 
     def _initialize_task(self, messages: list):
-        # 1. Text sicher extrahieren
-        content_data = messages[0]["content"]
+        # Wir suchen rückwärts nach der letzten echten Text-Eingabe des Nutzers
+        target_message = messages[0] # Fallback
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                content = msg.get("content", [])
+                # Prüfen, ob es echter Text ist und kein Tool-Result (Screenshot-Ergebnis)
+                if isinstance(content, list) and len(content) > 0 and content[0].get("type") == "text":
+                    target_message = msg
+                    break
+                elif isinstance(content, str):
+                    target_message = msg
+                    break
+
+        content_data = target_message["content"]
         full_content = content_data[0].get("text", "") if isinstance(content_data, list) else str(content_data)
 
         # 2. Task säubern (Dokumentation entfernen)
@@ -817,9 +1027,9 @@ class VLMOrchestratedAgent:
             self._task = full_content.split("FOLGENDE AUFGABE AUS:")[-1].strip()
             # Historie reinigen
             if isinstance(content_data, list):
-                messages[0]["content"][0]["text"] = self._task
+                target_message["content"][0]["text"] = self._task
             else:
-                messages[0]["content"] = self._task
+                target_message["content"] = self._task
         else:
             self._task = full_content
 
@@ -917,10 +1127,12 @@ class VLMOrchestratedAgent:
         Create a high-level ACTION plan for the task: {task}
         
         CRITICAL RULES:
-        1. Start DIRECTLY with the first physical interaction (e.g., "Double-click the icon" or "Type in search").
+        1. Start DIRECTLY with the first physical interaction (e.g., "Use the openApp command for programs" or "Type in search").
         2. Do NOT include 'Identify', 'Observe', or 'Determine' as separate steps. 
         3. Every step must describe a visible change or interaction on the screen.
         4. Keep it to max 5-7 steps.
+        5. NEVER suggest double-clicking an app icon. ALWAYS suggest using the 'openApp' action.
+        6. If the task involves importing/loading large files, include a step to 'Wait for the app to finish loading'.
 
         Output as a JSON dict:
         ```json

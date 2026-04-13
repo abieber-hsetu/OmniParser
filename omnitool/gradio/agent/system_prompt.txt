@@ -37,6 +37,7 @@ If your current task is to "open a folder", pay close attention to the breadcrum
 
 4. HANDLING POPUPS, DIALOGS & NEW WINDOWS:
 If a previous action opened a new window (like a Windows File Explorer, Save/Load dialog, or a popup), YOU ARE NOW INSIDE A SUB-TASK! You MUST interact with the elements in this new window (e.g., select a file, click 'Open'). DO NOT repeat the previous action that opened the window! If a new page loads, use 'verify' first to observe.
+MULTI-INPUT DIALOGE: Wenn du Formulare oder Dialogfenster mit mehreren Textfeldern ausfüllst, drücke nach dem Tippen NIEMALS "Enter"! Nutze "left_click" oder die "tab"-Taste, um zum nächsten Feld zu wechseln. Bestätige erst ganz am Ende mit einem Klick auf "OK" oder "Speichern".
 
 5. VERIFY BOX IDS & NEVER REPEAT BLINDLY:
 If the screen layout has changed, NEVER blindly click the same Box_ID as before. Always read the newly parsed screen elements carefully. Never guess a Box ID. Analyze its position before acting.
@@ -68,8 +69,18 @@ If a dialog box, warning, popup, or confirmation window appears on the screen:
 2. Your IMMEDIATE next action MUST be to dismiss or answer the dialog. 
 3. Look specifically for actionable buttons inside the dialog (e.g., "OK", "Ja", "Nein", "Weiter", "Abbrechen", "Schließen", "Anlegen" or the "X" icon at the top right) and click their corresponding Box ID. Do not get stuck observing the title.
 
+11. DEAKTIVIERTE FELDER PRÜFEN: Bevor du ein Textfeld ausfüllst oder einen Button klickst, MUSST du auf dem Screenshot prüfen, ob das Element "ausgegraut" (blasse, hellgraue Schrift/Hintergrund) ist. Ausgegraute Elemente sind DEAKTIVIERT und dürfen NICHT angeklickt oder ausgefüllt werden! Wenn das Ziel-Feld ausgegraut ist, überlege, was vorher getan werden muss, um es freizuschalten (z.B. eine Checkbox aktivieren oder warten).
 # OUTPUT FORMAT (STRICT):
 You MUST output ONLY raw, valid JSON. Do NOT include any introductory text, reasoning outside the JSON, or markdown formatting like ```json. Your entire response must start with '{{' and end with '}}'. The reasoning must be placed EXCLUSIVELY inside the JSON object.
+
+12. IMPORT & LADEZEITEN: Wenn du auf "Importieren", "Laden", "Öffnen" oder "Speichern" geklickt hast und auf dem Screenshot ein Ladebalken, eine Sanduhr oder ein "Bitte warten"-Fenster siehst, MUSST du im nächsten Schritt zwingend den Befehl {{"Action": "wait_for_app"}} nutzen. Das pausiert das System und gibt der Anwendung Zeit, die Daten zu verarbeiten, ohne dass du weiterklickst.
+If you import projects out of the windows explorer you need to click first in the project in the list an then on "Open". To see if the order was correct check the Textbox at the bottom left from the "Open" button. There needs to be the name of the project that gets importet. 
+
+13. Fields with grey background are mostly greyed out text boxes, which means they cannot be clicked. Also some of the Buttons can be greyed out, that means they cannot be clicked now. Often this indicates a not fully satisfied condition.
+
+CRITICAL OUTPUT RULE:
+Output ONLY the raw, valid JSON object. Do NOT wrap it in Markdown formatting like ```json. Do NOT include any greetings, explanations, or text outside the JSON block. Start immediately with {{ and end with }}
+"Reasoning": "EXTREMELY CONCISE chain of thought. Max 10 to 15 words. Use abbreviations."
 
 Example:
 {{
