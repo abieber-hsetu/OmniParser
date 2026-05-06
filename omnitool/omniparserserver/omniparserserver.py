@@ -72,8 +72,8 @@ async def parse(parse_request: ParseRequest):
         else:
             coord = raw_coords.get(str(i), raw_coords.get(i, [0,0,0,0]))
         
-        # Alten ID-Präfix aus dem Text entfernen
-        clean_text = re.sub(r'^Text Box ID \d+: ', '', str(raw_texts[i])).strip()
+        # FIX: Entfernt jetzt SOWOHL 'Text Box ID' als auch 'Icon Box ID'!
+        clean_text = re.sub(r'^(Text|Icon) Box ID \d+: ', '', str(raw_texts[i])).strip()
         
         elements.append({
             "y": coord[1], 
@@ -85,6 +85,59 @@ async def parse(parse_request: ParseRequest):
     # 4. RÄUMLICHE SORTIERUNG: Oben-Links nach Unten-Rechts (Leserichtung)
     # So wird ID 0 fast immer der Papierkorb oben links
     sorted_elements = sorted(elements, key=lambda e: (e["y"], e["x"]))
+
+    bad_labels = [
+        "unknown", "icon", "hott-to-hoot", "clouds", "unanswerable", 
+        "initiating a new item or feature", "navigationigation options", 
+        "opening a new tab or menu", "initiating a new item or service", 
+        "grapes", "menu", "home", "closing the window or dialog box"
+    ]
+
+    # 1. Erster Durchlauf: Markieren und Original-Text sichern
+    for el in sorted_elements:
+        w, h = el["box"][2], el["box"][3]
+        el["is_small"] = (w < 0.05 and h < 0.05)
+        el["original_content"] = el["content"].strip()
+
+    # 2. Zweiter Durchlauf: Texte verheiraten
+    for el in sorted_elements:
+        text_lower = el["original_content"].lower()
+        # Prüft, ob irgendein Müll-Wort IM Text enthalten ist
+        is_bad_label = any(bad in text_lower for bad in bad_labels) or text_lower == ""
+
+        if el["is_small"] and is_bad_label:
+            min_dist = 9999
+            best_match = None
+
+            for other in sorted_elements:
+                if other == el: 
+                    continue
+                
+                other_lower = other["original_content"].lower()
+                other_is_bad = any(bad in other_lower for bad in bad_labels) or other_lower == ""
+
+                # REGEL 1: Ziel darf kein Müll-Label sein!
+                # (Wir prüfen hier absichtlich NICHT mehr auf is_small, 
+                # damit kurze Wörter wie "OK" oder "Abwasser" als Text genutzt werden dürfen!)
+                if other_is_bad:
+                    continue
+
+                y_tolerance = 0.015
+                allowed_overlap = -0.02
+                max_dist = 0.25 
+
+                if abs(el["y"] - other["y"]) < y_tolerance and other["x"] > el["x"]:
+                    dist = other["x"] - (el["x"] + el["box"][2])
+
+                    if allowed_overlap < dist < max_dist and len(other["original_content"]) > 1:
+                        if dist < min_dist:
+                            min_dist = dist
+                            best_match = other["original_content"]
+
+            if best_match:
+                el["content"] = f"Checkbox ({best_match})"
+            elif is_bad_label:
+                el["content"] = "Icon"
 
     # 5. BILD NEU ZEICHNEN & LISTEN AUFBAUEN
     draw = ImageDraw.Draw(original_img)

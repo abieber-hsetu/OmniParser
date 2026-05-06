@@ -33,12 +33,21 @@ class OpenAIExecutor:
                 # --- AKTIONEN ÜBERSETZEN ---
                 action_map = {
                     "hover": "mouse_move",
-                    "click": "left_click"
+                    "click": "left_click",
+                    "scroll_down": "scroll_down", # Explizit erlauben
+                    "scroll_up": "scroll_up"      # Explizit erlauben
                 }
                 current_action = tool_input.get("action")
+                
                 if current_action in action_map:
                     tool_input["action"] = action_map[current_action]
-                    print(f">>> EXECUTOR TRANSLATION: '{current_action}' übersetzt in '{tool_input['action']}'")
+                    print(f">>> EXECUTOR: Aktion '{current_action}' vorbereitet.")
+                
+                # Falls 'clicks' im Orchestrator gesetzt wurden, hier sicherstellen
+                if "scroll" in current_action:
+                    if "clicks" not in tool_input:
+                        # Fallback-Werte falls nicht vom LLM geliefert
+                        tool_input["clicks"] = -400 if "down" in current_action else 400
 
                 raw_box_id = vlm_response_json.get("Box ID") or vlm_response_json.get("box_id")
                 

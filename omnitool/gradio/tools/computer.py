@@ -33,7 +33,9 @@ Action = Literal[
     "screenshot",
     "cursor_position",
     "hover",
-    "wait"
+    "wait",
+    "scroll_down",
+    "scroll_up"
 ]
 
 
@@ -165,6 +167,22 @@ class ComputerTool(BaseAnthropicTool):
                 self.send_to_vm(f"pyautogui.doubleClick({x}, {y})")
             
             return ToolResult(output=f"Performed {action} at ({x}, {y})")
+            
+        if action in ("scroll_down", "scroll_up"):
+            # Bewege die Maus an die Stelle, damit Windows weiß, wo gescrollt werden soll
+            if x is not None and y is not None:
+                self.send_to_vm(f"pyautogui.moveTo({x}, {y})")
+            
+            # Stärke des Scrolls abrufen (Standard: 400)
+            scroll_amount = kwargs.get('clicks', 400)
+            
+            if action == "scroll_down":
+                # In PyAutoGUI ist Scrollen nach UNTEN negativ!
+                self.send_to_vm(f"pyautogui.scroll({-abs(scroll_amount)})")
+            else:
+                self.send_to_vm(f"pyautogui.scroll({abs(scroll_amount)})")
+                
+            return ToolResult(output=f"Performed {action} at ({x}, {y}) with {scroll_amount} clicks")
 
         # 4. SONSTIGE Aktionen (Screenshot, Wait, etc.)
         if action == "screenshot":

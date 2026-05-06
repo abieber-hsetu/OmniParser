@@ -23,6 +23,11 @@ log_file.flush()
 sys.stdout = log_file
 sys.stderr = log_file
 
+cursor_path = os.path.join(os.path.dirname(__file__), "cursor.png")
+CURSOR_IMG = Image.open(cursor_path)
+# Direkt verkleinern, dann sparen wir uns die Rechenleistung später
+CURSOR_IMG = CURSOR_IMG.resize((int(CURSOR_IMG.width / 1.5), int(CURSOR_IMG.height / 1.5)))
+
 def execute_anything(data):
     shell = data.get('shell', False)
     command = data.get('command', "")
@@ -79,6 +84,28 @@ def execute(data):
             time.sleep(3)
             return jsonify({'status': 'success', 'message': 'Waited and observed UI'})
 
+        elif action == 'scroll_down':
+            if x is not None and y is not None:
+                pyautogui.moveTo(x, y) # Fokus auf explizites Ziel setzen
+            else:
+                # FALLBACK: Maus in die Mitte des Bildschirms setzen!
+                screen_w, screen_h = pyautogui.size()
+                pyautogui.moveTo(screen_w / 2, screen_h / 2)
+                
+            pyautogui.scroll(-50)
+            return jsonify({'status': 'success'})
+            
+        elif action == 'scroll_up':
+            if x is not None and y is not None:
+                pyautogui.moveTo(x, y) # Fokus auf explizites Ziel setzen
+            else:
+                # FALLBACK: Maus in die Mitte des Bildschirms setzen!
+                screen_w, screen_h = pyautogui.size()
+                pyautogui.moveTo(screen_w / 2, screen_h / 2)
+                
+            pyautogui.scroll(50)
+            return jsonify({'status': 'success'})
+
         # --- TASTATUR AKTIONEN ---
         elif action in ['type', 'type_text']:
             text = data.get('text', '')
@@ -108,7 +135,7 @@ execute_impl = execute  # switch to execute_anything to allow any command. Pleas
 parser = argparse.ArgumentParser()
 parser.add_argument("--log_file", help="log file path", type=str,
                     default=os.path.join(os.path.dirname(__file__), "server.log"))
-parser.add_argument("--port", help="port", type=int, default=5050)
+parser.add_argument("--port", help="port", type=int, default=5055)
 args = parser.parse_args()
 
 logging.basicConfig(filename=args.log_file,level=logging.DEBUG, filemode='w' )
@@ -140,13 +167,11 @@ def execute_command():
 
 @app.route('/screenshot', methods=['GET'])
 def capture_screen_with_cursor():    
-    cursor_path = os.path.join(os.path.dirname(__file__), "cursor.png")
     screenshot = pyautogui.screenshot()
     cursor_x, cursor_y = pyautogui.position()
-    cursor = Image.open(cursor_path)
-    # make the cursor smaller
-    cursor = cursor.resize((int(cursor.width / 1.5), int(cursor.height / 1.5)))
-    screenshot.paste(cursor, (cursor_x, cursor_y), cursor)
+    
+    # 1. Cursor aus dem RAM einkleben (Festplatte wird nicht berührt!)
+    screenshot.paste(CURSOR_IMG, (cursor_x, cursor_y), CURSOR_IMG)
 
     # Convert PIL Image to bytes and send
     img_io = BytesIO()
@@ -155,4 +180,4 @@ def capture_screen_with_cursor():
     return send_file(img_io, mimetype='image/png')
 
 if __name__ == '__main__':
-    app.run(host="0.0.0.0", port=args.port, debug=True)
+    app.run(host="0.0.0.0", port=args.port, debug=False)

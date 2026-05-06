@@ -21,16 +21,20 @@ from rag_manager import HsetuRagManager
 import hashlib
 import io
 import shutil
+from dotenv import load_dotenv
+
+load_dotenv()
 
 def extract_data(input_string, data_type):
     # 1. Versuch: Standard-Markdown Extraktion (```json ... ```)
-    pattern = f"```{data_type}" + r"(.*?)(```|$)"
-    matches = re.findall(pattern, input_string, re.DOTALL)
-    if matches:
-        return matches[0][0].strip()
-    
-    # 2. Versuch: Falls es JSON ist, suche einfach nach der ersten { und der letzten }
     if data_type == "json":
+        # Entferne Markdown-Blöcke falls vorhanden
+        input_string = re.sub(r'```json\s*|```', '', input_string).strip()
+        
+        # FIX: Doppelte geschweifte Klammern am Anfang/Ende korrigieren
+        if input_string.startswith("{{") and input_string.endswith("}}"):
+            input_string = input_string[1:-1].strip()
+            
         try:
             start_idx = input_string.find('{')
             end_idx = input_string.rfind('}')
@@ -38,8 +42,6 @@ def extract_data(input_string, data_type):
                 return input_string[start_idx:end_idx + 1].strip()
         except Exception:
             pass
-
-    # 3. Fallback: Gib den Originalstring zurück
     return input_string.strip()
 
 class VLMOrchestratedAgent:
@@ -129,15 +131,20 @@ class VLMOrchestratedAgent:
         if not token_usage:
             return 0.0
 
-        # Beispiel-Preise (Stand 2026, Preise pro 1 Mio. Tokens)
+        # Preise pro 1 Mio. Tokens (Input / Output)
         prices = {
             "gpt-5.4": {"input": 2.50, "output": 15.00},
             "gpt-4o-2024-11-20": {"input": 2.50, "output": 10.00},
             "o1": {"input": 15.00, "output": 60.00},
             "o3-mini": {"input": 1.10, "output": 4.40},
+            # --- NEU: Preise für Open-Source / alternative Modelle hinzufügen ---
+            "deepseek-r1-distill-llama-70b": {"input": 0.50, "output": 1.50}, # Beispielpreis via Groq
+            "qwen2.5-vl-72b-instruct": {"input": 0.80, "output": 2.00},       # Beispielpreis via DashScope
+            "claude-3-5-sonnet-20241022": {"input": 3.00, "output": 15.00},   # Falls Anthropic genutzt wird
             "default": {"input": 5.00, "output": 15.00}
         }
 
+        # Beziehe den Preis basierend auf dem exakten self.model string
         model_price = prices.get(self.model, prices["default"])
         
         # --- NEU: Kugelsicheres Auslesen der Tokens ---
@@ -431,15 +438,15 @@ class VLMOrchestratedAgent:
             search_query = f"Aufgabe: {self._task}. Aktueller Schritt: {clean_instruction}"
             
             instruction_header = f"""
-                ### 📋 AKTUELLE TEST-ANWEISUNG ({current_step} von {total_steps}):
+                ### 📋 CURRENT TEST INSTRUCTION ({current_step} of {total_steps}):
                 {current_instruction}
 
-                ### ⚠️ TECHNISCHE PROTOKOLL-REGELN:
-                1. Analysiere den Screenshot: Ist das ZIEL der Aufgabe bereits erreicht? Wenn ja, klicke NICHT erneut, sondern beende den Schritt!
-                2. Wenn das Ziel erreicht ist, schreibe zwingend das Codewort **SCHRITT_ABGESCHLOSSEN** ans Ende deines Reasonings.
-                3. APP STARTEN: Um ein Programm zu öffnen, nutze NIEMALS "double_click"! Nutze IMMER den Befehl {{"Action": "openApp", "Text_content": "Name des Programms"}}. WICHTIG: Ersetze "Name des Programms" durch den echten Namen (z.B. "Excel", "Notepad" oder "Hott-Therm").
-                4. IMPORT & LADEZEITEN: Wenn du ein Projekt importierst, eine Datei lädst oder einen Ladescreen siehst, nutze zwingend den Befehl {{"Action": "wait_for_app"}}. Das gibt dem System Zeit, die Daten zu verarbeiten, ohne dass du weiterklickst.
-                5. INAKTIVE BUTTONS: Der OmniParser erkennt NICHT, ob ein Button ausgegraut (disabled) ist. Du MUSST zwingend das Originalbild prüfen! Wenn ein Button blass, grau oder visuell inaktiv ist, darfst du ihn NIEMALS anklicken! Überlege stattdessen, was auf dem Bildschirm noch fehlt (z.B. ein Pflichtfeld ausfüllen), damit der Button aktiv wird.
+                ### ⚠️ TECHNICAL PROTOCOL RULES:
+                1. Analyze the screenshot: Is the TARGET of the task already achieved? If yes, do NOT click again, but terminate the step!
+                2. Once the target is achieved, you MUST append the codeword **STEP_COMPLETED** to the end of your Reasoning.
+                3. LAUNCHING APPS: To open a program, NEVER use "double_click"! ALWAYS use the command {{"Action": "openApp", "Text_content": "Name of the Program"}}. IMPORTANT: Replace "Name of the Program" with the actual name (e.g., "Excel", "Notepad", or "Hott-Therm").
+                4. IMPORTS & LOADING TIMES: When importing a project, loading a file, or seeing a loading screen, you MUST use the command {{"Action": "wait_for_app"}}. This gives the system time to process data without you clicking prematurely.
+                5. INACTIVE BUTTONS: OmniParser does NOT detect if a button is disabled (greyed out). You MUST cross-reference with the original image! If a button is pale, grey, or visually inactive, NEVER click it! Instead, deduce what is missing on the screen (e.g., filling out a mandatory field) to make the button active.
                 """
         else:
             search_query = self._task if hasattr(self, '_task') else "Nächster Schritt"
@@ -528,13 +535,14 @@ class VLMOrchestratedAgent:
 
         # 9. JSON-Parsing und Schritt-Fortschritt-Kontrolle
         try:
-            json_match = re.search(r'(\{.*\})', vlm_response, re.DOTALL)
-            clean_json = json_match.group(1) if json_match else vlm_response
-            vlm_response_json = json.loads(clean_json)
+            # Nutze deine bereits existierende Hilfsfunktion!
+            clean_json_str = extract_data(vlm_response, "json")
+            vlm_response_json = json.loads(clean_json_str)
             reasoning = vlm_response_json.get("Reasoning", vlm_response_json.get("reasoning", ""))
-                
-        except Exception:
-            vlm_response_json = {"Reasoning": "JSON Formatfehler", "Action": "wait", "Box_ID": None}
+        except Exception as e:
+            print(f"❌ JSON-Parsing fehlgeschlagen: {e}")
+            print(f"ROH-ANTWORT VOM LLM: {vlm_response}") # Wichtig für Debugging!
+            vlm_response_json = {"Reasoning": f"Fehler: {str(e)}", "Action": "wait", "Box_ID": None}
 
         if vlm_response_json and 'Action' in vlm_response_json:
             action = vlm_response_json.get('Action', '').lower()
@@ -566,36 +574,29 @@ class VLMOrchestratedAgent:
                 
             # 2. NEU: Der openApp-Befehl
             elif action == "openapp":
+                # Extrahiere den Namen aus allen möglichen JSON-Feldern
                 app_name = str(vlm_response_json.get("Text_content", 
                            vlm_response_json.get("text_content", 
                            vlm_response_json.get("value", 
-                           vlm_response_json.get("Program", 
-                           vlm_response_json.get("App_Name", 
-                           vlm_response_json.get("App", "")))))))
+                           vlm_response_json.get("App", ""))))).strip()
                 
-                if app_name.lower() in ["app", "name des programms", "none", "", "null"]:
+                # Prüfe, ob das LLM nur Platzhalter geliefert hat
+                if not app_name or app_name.lower() in ["app", "name des programms", "none", "null", ""]:
+                    # Fallback: Versuche den Namen aus der globalen Task zu ziehen
                     app_name = self._task.split()[1] if hasattr(self, '_task') and len(self._task.split()) > 1 else "Hott-Therm"
                 
-                clean_app_name = app_name.replace('-', ' ').replace('_', ' ').strip().lower()
+                clean_app_name = app_name.replace('-', ' ').replace('_', ' ').lower().strip()
 
-                # --- START NEU: DAS GEDÄCHTNIS ---
                 if clean_app_name in self.launched_programs:
-                    print(f"🛡️ PYTHON-BLOCKER: LLM wollte '{clean_app_name}' nochmal öffnen. Wird blockiert! Warte stattdessen auf das Laden...")
-                    
-                    # Wir verwandeln den Klick heimlich in ein bloßes "Warten"
+                    print(f"🛡️ PYTHON-BLOCKER: '{clean_app_name}' bereits gestartet. Warte auf Fenster...")
                     vlm_response_json["Action"] = "wait"
-                    if "Next Action" in vlm_response_json: vlm_response_json["Next Action"] = "wait"
-                    vlm_response_json["post_action_wait"] = 30  # Dem LLM nochmal 30s Ladezeit aufzwingen
+                    vlm_response_json["post_action_wait"] = 20
                 else:
-                    print(f"🚀 LLM-BEFEHL: Agent öffnet App '{clean_app_name}' direkt über openApp-Makro!")
-                    self.launched_programs.add(clean_app_name) # App ins Gedächtnis eintragen!
-                    
+                    print(f"🚀 LLM-BEFEHL: Starte Makro für '{clean_app_name}'")
+                    self.launched_programs.add(clean_app_name)
                     vlm_response_json["Action"] = "openapp"
-                    if "Next Action" in vlm_response_json: vlm_response_json["Next Action"] = "openapp"
-                    
-                    # Timeout gefahrlos auf 180s (3 Min) hochschrauben! 
-                    # Da loop.py dynamisch überwacht, bricht die Pause exakt in der Sekunde ab, in der die GUI da ist.
-                    vlm_response_json["post_action_wait"] = 180
+                    # WICHTIG: Hier nur kurz warten, damit die Befehlskette (Tool-Blöcke) Zeit hat durchzugehen
+                    vlm_response_json["post_action_wait"] = 2
             # --- ENDE: PYTHON-BLOCKER ---
         
         # --- HIER STARTET DER NEUE BULLET-PROOF BLOCK ---
@@ -891,6 +892,35 @@ class VLMOrchestratedAgent:
             # 5. Abschließendes Enter drücken (Startet das tatsächliche Programm)
             response_content.append(BetaToolUseBlock(
                 id=f'toolu_{uuid.uuid4()}', input={'action': 'key', 'text': 'enter'}, name='computer', type='tool_use'))
+        
+        elif next_action.lower() == "trigger_login":
+            print("🔒 Sicherheits-Feature: Iniziere geschützte Credential-Eingabe...")
+            # Wir senden die Befehle direkt an die Tool-Liste für loop.py
+            # oder rufen die Funktion direkt im Agenten auf
+            cred_blocks = self.input_credentials()
+            response_content.extend(cred_blocks)
+        
+        elif next_action.lower() == "scroll_down":
+            # Wir verpacken den Befehl für den Transport zur VM
+            action_input = {
+                'action': 'scroll_down', 
+                'clicks': vlm_response_json.get('clicks', -300) # Negativ für Down
+            }
+            if 'box_centroid_coordinate' in vlm_response_json:
+                action_input['coordinate'] = vlm_response_json['box_centroid_coordinate']
+
+            response_content.append(BetaToolUseBlock(
+                id=f'toolu_{uuid.uuid4()}',
+                input=action_input,
+                name='computer', 
+                type='tool_use'
+            ))
+
+        elif next_action.lower() == "scroll_up":
+            action_input = {'action': 'scroll_up', 'clicks': vlm_response_json.get('clicks', 300)}
+            if 'box_centroid_coordinate' in vlm_response_json:
+                action_input['coordinate'] = vlm_response_json['box_centroid_coordinate']
+            response_content.append(BetaToolUseBlock(id=f'toolu_{uuid.uuid4()}', input=action_input, name='computer', type='tool_use'))
                 
         else:
             # FIX: Hänge die Koordinaten zwingend an den tatsächlichen Klick-Befehl an!
@@ -972,6 +1002,34 @@ class VLMOrchestratedAgent:
 
         return response_message, vlm_response_json
 
+    def input_credentials(self):
+        """Baut die Tool-Blöcke für die Credentials, ohne dass das LLM sie sieht."""
+        username = os.getenv("APP_USER")
+        password = os.getenv("APP_PASSWORD")
+        
+        blocks = []
+        if username and password:
+            # 1. Benutzername tippen
+            blocks.append(BetaToolUseBlock(
+                id=f'toolu_{uuid.uuid4()}', input={'action': 'type', 'text': username}, name='computer', type='tool_use'))
+            
+            # 2. Tab drücken, um ins Passwortfeld zu springen
+            blocks.append(BetaToolUseBlock(
+                id=f'toolu_{uuid.uuid4()}', input={'action': 'key', 'text': 'tab'}, name='computer', type='tool_use'))
+            
+            # 3. Passwort tippen
+            blocks.append(BetaToolUseBlock(
+                id=f'toolu_{uuid.uuid4()}', input={'action': 'type', 'text': password}, name='computer', type='tool_use'))
+            
+            # 4. Enter drücken zum Bestätigen
+            blocks.append(BetaToolUseBlock(
+                id=f'toolu_{uuid.uuid4()}', input={'action': 'key', 'text': 'enter'}, name='computer', type='tool_use'))
+            
+        else:
+            print("⚠️ WARNUNG: APP_USER oder APP_PASSWORD nicht in der .env Datei gefunden!")
+            
+        return blocks
+
 
     def _api_response_callback(self, response: APIResponse):
         self.api_response_callback(response)
@@ -986,11 +1044,11 @@ class VLMOrchestratedAgent:
         rag_text = ""
         if rag_context:
             rag_text = (
-                "### STATISCHES NACHSCHLAGEWERK (NUR ZUM NACHSCHLAGEN):\n"
-                "Das folgende Wissen dient nur der Orientierung (z.B. Wo finde ich ein Menü?).\n"
-                "IGNORIERE alle Nummerierungen oder 'Schritte' innerhalb dieses Blocks für deine Planung!\n"
-                f"INHALT:\n{rag_context}\n"
-                "--- ENDE NACHSCHLAGEWERK ---"
+                "### STATIC REFERENCE MATERIAL (FOR LOOKUP ONLY):\n"
+                "The following knowledge serves only as orientation (e.g., Where can I find a specific menu?).\n"
+                "IGNORE all numbering or 'steps' within this block for your planning!\n"
+                f"CONTENT:\n{rag_context}\n"
+                "--- END OF REFERENCE MATERIAL ---"
             )
 
         # 4. Alles in das Template einsetzen

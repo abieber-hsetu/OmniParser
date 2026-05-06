@@ -1,23 +1,29 @@
 # --- KONFIGURATION ---
 $driveZ = "Z:"
-$shareZ = "\\10.0.2.2\Data" 
-
-$driveT = "T:"
-$testDataDir = "Z:\testmuster" # Der Pfad auf dem bereits gemounteten Z:
+$shareZ = "\\172.18.0.1\Data"
 
 $user = "docker"
 $pass = "docker"
 $scriptFile = "Z:\server\main.py"
 $port = 5050
 
-Write-Host "--- OmniBox Agent: Persistent Multi-Drive Mode (SUBST) ---" -ForegroundColor Cyan
+Write-Host "Setze DNS-Server auf 8.8.8.8..." -ForegroundColor Yellow
+Get-NetAdapter | Where-Object Status -eq 'Up' | Set-DnsClientServerAddress -ServerAddresses '8.8.8.8', '1.1.1.1'
 
-# Funktion für Netzwerk-Mount (Nur für Z:)
+Write-Host "--- OmniBox Agent: Network Drive Mode ---" -ForegroundColor Cyan
+
+# Funktion für Netzwerk-Mount
 function Connect-NetworkDrive {
     param([string]$letter, [string]$path)
-    Write-Host "Verbinde Netzwerk-Laufwerk $letter mit $path..." -ForegroundColor Yellow
-    net use $letter /delete /y 2>$null
+    
+    Write-Host "Bereinige alte unsichtbare Verbindungen..." -ForegroundColor DarkGray
+    net use * /delete /y 2>$null
+    # Gezielt die versteckte Systemverbindung zur IP killen:
+    net use \\172.18.0.1\IPC$ /delete /y 2>$null 
+    
     Start-Sleep -Seconds 1
+    
+    Write-Host "Verbinde Netzwerk-Laufwerk $letter mit $path..." -ForegroundColor Yellow
     net use $letter $path /user:$user $pass /persistent:no
 }
 
@@ -29,23 +35,15 @@ $connected = $false
 while (-not $connected -and $attempt -le $maxAttempts) {
     Write-Host "Verbindungsversuch $attempt von $maxAttempts..."
     
-    # 1. Z: über das Netzwerk verbinden
+    # Z: über das Netzwerk verbinden
     Connect-NetworkDrive -letter $driveZ -path $shareZ
 
-    # 2. Prüfen, ob Z: da ist UND der Unterordner existiert
-    if (Test-Path $testDataDir) {
-        Write-Host "Basis-Pfad $testDataDir gefunden. Erstelle virtuelles Laufwerk $driveT..." -ForegroundColor Yellow
-        
-        # T: über SUBST lokal von Z: abspalten
-        subst $driveT /d 2>$null # Alten Subst löschen
-        subst $driveT $testDataDir
-        
-        if (Test-Path "$driveT\") {
-            $connected = $true
-            Write-Host "Erfolg! Z: (Netz) und T: (Subst) sind bereit." -ForegroundColor Green
-        }
+    # Prüfen, ob Z: da ist (wir testen, ob das Python-Skript erreichbar ist)
+    if (Test-Path $scriptFile) {
+        $connected = $true
+        Write-Host "Erfolg! Laufwerk Z: ist bereit." -ForegroundColor Green
     } else {
-        Write-Host "Warte auf Netzwerk/Ordner: $testDataDir..." -ForegroundColor Magenta
+        Write-Host "Warte auf Netzwerk/Datei: $scriptFile..." -ForegroundColor Magenta
         Start-Sleep -Seconds 5
         $attempt++
     }
@@ -62,5 +60,5 @@ if ($connected) {
         $_.Exception.Message
     }
 } else {
-    Write-Host "!!! ABBRUCH: Testdaten-Pfad wurde nicht gefunden !!!" -ForegroundColor Red
+    Write-Host "!!! ABBRUCH: Z: Laufwerk oder Skript wurde nicht gefunden !!!" -ForegroundColor Red
 }

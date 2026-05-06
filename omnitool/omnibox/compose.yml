@@ -1,6 +1,8 @@
 services:
   windows:
     image: windows-local
+    env_file:
+      - ../../../.env
     container_name: omni-windows
     privileged: true
     environment:
@@ -10,8 +12,8 @@ services:
       DISK_SIZE: "50G" # vor dem Erhöhen schauen ob noch genug Speicher frei ist
       KVM: "Y"
       CPU_MODEL: "host"
-      NET_TYPE: "none"
-      PASST: "N"
+      # NET_TYPE: "none"
+      # ARGUMENTS: "-netdev user,id=net0,hostfwd=tcp::5055-:5050 -device e1000,netdev=net0 -vga none -device virtio-vga,xres=1920,yres=1080"
       ARGUMENTS: "-netdev user,id=net0,hostfwd=tcp::5055-:5050 -device e1000,netdev=net0 -vga none -device virtio-vga,xres=1920,yres=1080"
       DEBUG: "Y"
       VIEW: "VNC"

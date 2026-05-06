@@ -359,7 +359,7 @@ configureSlirp() {
   VM_NET_IP="$ip"
   return 0
 }
-
+set -x # Enable debugging
 configurePasst() {
 
   NETWORK="passt"
@@ -445,6 +445,7 @@ configurePasst() {
   VM_NET_IP="$ip"
   return 0
 }
+set +x # Disable debugging
 
 configureNAT() {
 

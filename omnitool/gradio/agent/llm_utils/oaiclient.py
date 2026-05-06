@@ -59,9 +59,10 @@ def run_oai_interleaved(messages: list, system: str, model_name: str, api_key: s
         token_usage = response.json()['usage']
         return text, token_usage
     except Exception as e:
-        print(f"Error in interleaved openAI: {e}. This may due to your invalid API key. Please check the response: {response.json()} ")
-        # FIX 2: Wir geben zwingend zwei Werte zurück, damit das Skript nicht hart abstürzt
-        return f"API_ERROR: {response.json()}", {"prompt_tokens": 0, "completion_tokens": 0}
+        # Wir rufen .text und .status_code ab, statt blind .json() zu erzwingen!
+        status = getattr(response, 'status_code', 'Unknown Status')
+        text_content = getattr(response, 'text', 'No Text')
+        print(f"Error in interleaved openAI: {e}. HTTP Status: {status}. Response Text: {text_content}")
 
 
     try:
@@ -69,5 +70,7 @@ def run_oai_interleaved(messages: list, system: str, model_name: str, api_key: s
         token_usage = response.json()['usage']
         return text, token_usage
     except Exception as e:
-        print(f"Error in interleaved openAI: {e}. This may due to your invalid API key. Please check the response: {response.json()} ")
-        return response.json()
+        # Wir rufen .text und .status_code ab, statt blind .json() zu erzwingen!
+        status = getattr(response, 'status_code', 'Unknown Status')
+        text_content = getattr(response, 'text', 'No Text')
+        print(f"Error in interleaved openAI: {e}. HTTP Status: {status}. Response Text: {text_content}")

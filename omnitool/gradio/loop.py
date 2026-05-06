@@ -29,6 +29,7 @@ import time
 import requests
 import io
 from PIL import Image, ImageDraw, ImageChops, ImageStat
+import numpy as np
 
 BETA_FLAG = "computer-use-2024-10-22"
 
@@ -47,7 +48,7 @@ PROVIDER_TO_DEFAULT_MODEL_NAME: dict[APIProvider, str] = {
 }
 
 
-def wait_for_ui_change(vm_url, timeout=45, sensitivity_threshold=5.0):
+def wait_for_ui_change(vm_url, timeout=45, sensitivity_threshold=10.0):
     """
     Zwei-Phasen-Wächter: Wartet zuerst auf eine Änderung (Popup) und 
     danach auf eine Stabilität des Bildschirms (Fertig geladen).
@@ -128,6 +129,47 @@ def wait_for_ui_change(vm_url, timeout=45, sensitivity_threshold=5.0):
 
     print(f"⏱️ Timeout von {timeout}s erreicht. Gehe davon aus, dass die UI fertig ist.")
 
+    # Funktion für Erkennung des Grundriss in HottCad
+def get_floorplan_corners_lightweight(image_path_or_bytes):
+    """
+    Findet die obere linke Ecke des Grundrisses mit purem Pillow & Numpy.
+    Kein OpenCV notwendig!
+    """
+    # 1. Bild laden und in Graustufen umwandeln ('L' = Luma/Grayscale)
+    img = Image.open(image_path_or_bytes).convert('L')
+    
+    # Optional aber wichtig: Da links im HottCAD-Menü auch schwarzer Text ist, 
+    # schneiden wir (crop) das Bild grob auf die rechte Hälfte zu, 
+    # wo NUR der Grundriss ist. (Passe die Werte an deine Auflösung an!)
+    # Format: (left, upper, right, lower)
+    width, height = img.size
+    canvas_area = img.crop((424, 371, 922, 724))
+    
+    # 2. In eine Numpy-Matrix (Zahlenwerte der Pixel) umwandeln
+    data = np.array(canvas_area)
+    
+    # 3. Threshold: Finde die Koordinaten aller "sehr dunklen" Pixel (Wert unter 50)
+    # np.argwhere gibt eine Liste von [y, x] Koordinaten zurück
+    black_pixels = np.argwhere(data < 50)
+    
+    if len(black_pixels) == 0:
+        return None # Keine schwarzen Linien gefunden
+        
+    # 4. Finde den absolut kleinsten Y-Wert und kleinsten X-Wert (Obere linke Ecke)
+    y_min, x_min = black_pixels.min(axis=0)
+    y_max, x_max = black_pixels.max(axis=0)
+    
+    # Überprüfen, ob es wirklich ein Haus ist (breiter/höher als 50 Pixel) und kein Rauschen
+    if (x_max - x_min) > 50 and (y_max - y_min) > 50:
+        # WICHTIG: Da wir das Bild am Anfang beschnitten (gecroppt) haben, 
+        # müssen wir den X/Y Offset wieder addieren, um die echten Bildschirm-Koordinaten zu haben!
+        real_x = int(x_min) + 424
+        real_y = int(y_min) + 371
+        
+        return {"top_left": (real_x, real_y)}
+        
+    return None
+
 def sampling_loop_sync(
     *,
     model: str,
@@ -143,7 +185,7 @@ def sampling_loop_sync(
     save_folder: str = "./uploads",
     instruction_steps = [],
     current_step_index = 0,
-    windows_agent_url: str = "127.0.0.1:5055"  # <--- NEU: Standardwert für lokales Testen
+    windows_agent_url: str = "127.0.0.1:5055"
 ):
     print(f"DEBUG-START: Das gewählte Modell ist: '{model}'")
     """
@@ -220,6 +262,10 @@ def sampling_loop_sync(
         skip_counter = 0
         MAX_SKIPS = 5
 
+        # max waits for llm
+        consecutive_waits = 0
+        MAX_WAITS = 2
+
         while True:
             # Frame Skipping Definition
             try:
@@ -273,19 +319,13 @@ def sampling_loop_sync(
             # A. Screenshot machen und durch OmniParser analysieren lassen
             parsed_screen = omniparser_client()
 
-            # --- START: TOKEN-OPTIMIERUNG ---
-            raw_text = parsed_screen.get('screen_info', '')
-            clean_elements = []
-            for line in raw_text.strip().split('\n'):
-                if ':' in line and ',' in line:
-                    # Macht aus "ID: 0, Icon Box ID 0: Recycle Bin" -> "[0] Recycle Bin"
-                    box_id = line.split(',')[0].replace('ID:', '').strip()
-                    label = line.split(':', 2)[-1].strip()
-                    clean_elements.append(f"[{box_id}] {label}")
-            
-            # Überschreibe die lange Liste mit dem extrem kurzen String
-            parsed_screen['screen_info'] = " | ".join(clean_elements)
-            # --- ENDE: TOKEN-OPTIMIERUNG ---
+            start_corner = get_floorplan_corners_lightweight(io.BytesIO(resp.content))
+
+            if start_corner:
+                x, y = start_corner["top_left"]
+                # 3. Wir schummeln den Phantom-Button für das LLM in die Liste!
+                parsed_screen["screen_info"] += f"\n[999] Grundriss Startpunkt Oben Links"
+                parsed_screen["boxes"]["999"] = [x, y, 5, 5]
             
             # B. KI-Entscheidung einholen
             # actor() ruft deinen VLMOrchestratedAgent auf
@@ -313,6 +353,25 @@ def sampling_loop_sync(
                     ]
                 })
                 continue # Wir überspringen den Executor und lassen die KI neu entscheiden
+            
+            action_name = vlm_response_json.get("Action")
+            reasoning = vlm_response_json.get("Reasoning", "")
+            wait_time = vlm_response_json.get("post_action_wait", 0)
+            
+            if action_name == "wait":
+                consecutive_waits += 1
+                if "Lokaler Python-Blocker" in reasoning or wait_time >= 20:
+                    print("⏳ Notbremse blockiert: Echtes Laden wird fortgesetzt (System wartet...)")
+                    # Wir setzen den Zähler zurück oder frieren ihn ein, da dieses Warten gewollt ist!
+                    consecutive_waits = 0 
+                else:
+                    # Das ist ein "echtes" Wait vom LLM
+                    consecutive_waits += 1
+                    if consecutive_waits >= 2:
+                        print("🛑 NOTBREMSE: LLM steckt in der Wait-Falle! (2x 'wait' in Folge). Breche Aufgabe ab.")
+                        break
+            else:
+                consecutive_waits = 0
 
             # C. Ausführung durch den OpenAIExecutor
             tool_result_content = None 
