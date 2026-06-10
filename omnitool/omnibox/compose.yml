@@ -7,17 +7,18 @@ services:
     privileged: true
     environment:
       VERSION: "11"
-      RAM_SIZE: "8G"
+      RAM_SIZE: "16G"
       CPU_CORES: "6"
-      DISK_SIZE: "50G" # vor dem Erhöhen schauen ob noch genug Speicher frei ist
+      DISK_SIZE: "75G" # vor dem Erhöhen schauen ob noch genug Speicher frei ist
       KVM: "Y"
       CPU_MODEL: "host"
       # NET_TYPE: "none"
       # ARGUMENTS: "-netdev user,id=net0,hostfwd=tcp::5055-:5050 -device e1000,netdev=net0 -vga none -device virtio-vga,xres=1920,yres=1080"
-      ARGUMENTS: "-netdev user,id=net0,hostfwd=tcp::5055-:5050 -device e1000,netdev=net0 -vga none -device virtio-vga,xres=1920,yres=1080"
+      ARGUMENTS: "-netdev user,id=net0 -device virtio-net-pci,netdev=net0 -vga none -device virtio-vga,xres=1920,yres=1080 -k de${QEMU_EXTRA_ARGS:-}"
       DEBUG: "Y"
       VIEW: "VNC"
       WEBVIEW: "Y"
+      USER_PORTS: "5055:5050"
     dns:
       - 8.8.8.8
       - 1.1.1.1

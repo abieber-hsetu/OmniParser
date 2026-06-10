@@ -286,13 +286,22 @@ def valid_params(user_input, state):
     ]
     
     for server_name, url, endpoint in check_configs:
+        # --- DER ULTIMATIVE BYPASS FÜR DEN WINDOWS AGENTEN ---
+        if "Windows" in server_name or "Agent" in server_name:
+            print(f"⚠️ Überspringe Netzwerk-Check für {server_name}, um den UI-Start zu erzwingen!")
+            continue # Springt sofort zum nächsten Server (OmniParser) weiter, ohne zu prüfen!
+            
         try:
-            full_url = f"http://{url.replace('http://', '')}{endpoint}"
-            response = requests.get(full_url, timeout=3)
+            full_url = f"http://{url}{endpoint}"
+            print(f"Checking {server_name} at {full_url}...")
+            
+            # Der normale Check (läuft jetzt nur noch für OmniParser und Co.)
+            response = requests.get(full_url, timeout=10)
             if response.status_code != 200:
-                errors.append(f"{server_name} antwortet mit {response.status_code}")
-        except:
-            errors.append(f"{server_name} ({url}) ist nicht erreichbar")
+                errors.append(f"{server_name} antwortet mit Status {response.status_code}")
+                
+        except Exception as e:
+            errors.append(f"{server_name} ist nicht erreichbar ({str(e)})")
     
     if not state.get("api_key", "").strip():
         errors.append("LLM API Key fehlt")

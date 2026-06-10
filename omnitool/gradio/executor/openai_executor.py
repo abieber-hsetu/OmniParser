@@ -25,6 +25,7 @@ class OpenAIExecutor:
         tool_result_content = []
         
         for content_block in cast(list[BetaContentBlock], response.content):
+            # Zeige den Tool-Use-Block im Chat an
             self.output_callback(content_block, sender="bot")
             
             if content_block.type == "tool_use":
@@ -34,8 +35,8 @@ class OpenAIExecutor:
                 action_map = {
                     "hover": "mouse_move",
                     "click": "left_click",
-                    "scroll_down": "scroll_down", # Explizit erlauben
-                    "scroll_up": "scroll_up"      # Explizit erlauben
+                    "scroll_down": "scroll_down",
+                    "scroll_up": "scroll_up"
                 }
                 current_action = tool_input.get("action")
                 
@@ -43,20 +44,17 @@ class OpenAIExecutor:
                     tool_input["action"] = action_map[current_action]
                     print(f">>> EXECUTOR: Aktion '{current_action}' vorbereitet.")
                 
-                # Falls 'clicks' im Orchestrator gesetzt wurden, hier sicherstellen
                 if "scroll" in current_action:
                     if "clicks" not in tool_input:
-                        # Fallback-Werte falls nicht vom LLM geliefert
                         tool_input["clicks"] = -400 if "down" in current_action else 400
 
+                # --- KOORDINATEN-BERECHNUNG ---
                 raw_box_id = vlm_response_json.get("Box ID") or vlm_response_json.get("box_id")
-                
                 if raw_box_id is not None:
                     try:
                         idx = int(raw_box_id)
                         coords_list = parsed_screen.get("coordinates", [])
                         box = None
-
                         if isinstance(coords_list, dict):
                             box = coords_list.get(str(idx)) or coords_list.get(idx)
                         elif isinstance(coords_list, list) and idx < len(coords_list):
@@ -65,35 +63,22 @@ class OpenAIExecutor:
                         if box is not None:
                             img_width = parsed_screen.get("width", 1280)
                             img_height = parsed_screen.get("height", 800)
-
                             if len(box) >= 4:
-                                # --- WIR WISSEN JETZT: Format ist [x, y, breite, höhe] ---
-                                x_min, y_min = box[0], box[1]
-                                width, height = box[2], box[3]
-
-                                # Wir zielen auf das obere Drittel (30%), um immer das Icon zu treffen!
-                                center_x = x_min + (width / 2)
-                                center_y = y_min + (height * 0.3)
+                                center_x = box[0] + (box[2] / 2)
+                                center_y = box[1] + (box[3] * 0.3)
                             else:
                                 center_x, center_y = box[0], box[1]
 
-                            # Ratios in echte Pixel umrechnen
                             if center_x <= 1.0 and center_y <= 1.0:
                                 center_x *= img_width
                                 center_y *= img_height
+                            tool_input['coordinate'] = (min(max(int(center_x), 0), img_width - 1), 
+                                                        min(max(int(center_y), 0), img_height - 1))
 
-                            # Sicherheitsnetz (Clamping)
-                            safe_x = min(max(int(center_x), 0), img_width - 1)
-                            safe_y = min(max(int(center_y), 0), img_height - 1)
-
-                            tool_input['coordinate'] = (safe_x, safe_y)
-                            print(f">>> EXECUTOR MATCH: Box {idx} (Rohdaten: {box}) -> Pixel {tool_input['coordinate']}")
-                        else:
-                            print(f">>> EXECUTOR ERROR: Box {idx} nicht gefunden.")
-                    
                     except (ValueError, TypeError):
                         print(f">>> EXECUTOR ERROR: Box ID '{raw_box_id}' ist ungültig.")
 
+                # --- TOOL AUSFÜHREN ---
                 try:
                     result = asyncio.run(self.tool_collection.run(
                         name=content_block.name,
@@ -102,8 +87,13 @@ class OpenAIExecutor:
                 except Exception as e:
                     result = ToolResult(error=str(e))
 
-                self.output_callback(result, sender="bot")
+                # --- GEFILTERTES LOGGING ---
+                # HIER wird der "Buchstabiersalat" bei 'type' unterdrückt
+                is_type_action = (current_action == "type")
+                if not (is_type_action and "Pressed keys" in str(result.output)):
+                    self.output_callback(result, sender="bot")
                 
+                # Ergebnis für die KI-Historie
                 res_block: BetaToolResultBlockParam = {
                     "type": "tool_result",
                     "content": self._format_tool_output(result),

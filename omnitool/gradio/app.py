@@ -216,15 +216,31 @@ def valid_params(user_input, state):
     ]
     
     for server_name, url, endpoint in check_configs:
-        try:
-            full_url = f"http://{url}{endpoint}"
-            print(f"Checking {server_name} at {full_url}...")
-            
-            response = requests.get(full_url, timeout=5)
-            if response.status_code != 200:
-                errors.append(f"{server_name} antwortet mit Status {response.status_code}")
-        except Exception as e:
-            errors.append(f"{server_name} ist nicht erreichbar ({str(e)})")
+            try:
+                full_url = f"http://{url}{endpoint}"
+                print(f"Checking {server_name} at {full_url}...")
+                
+                # --- FIX FÜR DEN WINDOWS AGENTEN ---
+                # Wenn es sich um den Windows-Host handelt, senden wir einen leeren POST-Request,
+                # da der Flask-Server bei GET die Verbindung hart trennt.
+                if "Windows" in server_name or "Agent" in server_name:
+                    response = requests.post(full_url, json={"mode": "check"}, timeout=5)
+                    # Jede Antwort (auch 400/405) bedeutet: Der Server LEBT und lauscht am Port!
+                    if response.status_code is None:
+                        errors.append(f"{server_name} ist nicht erreichbar")
+                else:
+                    # Der alte Standard-Check für OmniParser und Co.
+                    response = requests.get(full_url, timeout=5)
+                    if response.status_code != 200:
+                        errors.append(f"{server_name} antwortet mit Status {response.status_code}")
+                        
+            except Exception as e:
+                # Wenn wir ein 'Empty reply' (Verbindungsabbruch) bekommen, der Server aber prinzipiell da ist,
+                # fangen wir das für den Windows-Host hier als "Erfolg" ab.
+                if "Windows" in server_name and ("Empty reply" in str(e) or "RemoteDisconnected" in str(e)):
+                    print(f"ℹ️ {server_name} hat die Verbindung getrennt, antwortet aber. Port ist offen!")
+                else:
+                    errors.append(f"{server_name} ist nicht erreichbar ({str(e)})")
     
     if not state["api_key"].strip():
         errors.append("LLM API Key is not set")

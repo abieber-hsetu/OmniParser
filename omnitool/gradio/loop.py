@@ -29,7 +29,9 @@ import time
 import requests
 import io
 from PIL import Image, ImageDraw, ImageChops, ImageStat
+import cv2
 import numpy as np
+import base64
 
 BETA_FLAG = "computer-use-2024-10-22"
 
@@ -47,6 +49,35 @@ PROVIDER_TO_DEFAULT_MODEL_NAME: dict[APIProvider, str] = {
     APIProvider.OPENAI: "gpt-5.4",
 }
 
+def get_checkbox_status(box, img_bytes):
+    """
+    Prüft, ob eine Checkbox angehakt ist (unterstützt blaue/schwarze Haken).
+    """
+    img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
+    crop = img.crop((box[0], box[1], box[0]+box[2], box[1]+box[3]))
+    
+    # In HSV umwandeln für bessere Farberkennung
+    hsv = np.array(crop.convert('HSV'))
+    
+    # Bereich für Blau (Hott-Therm Theme)
+    # Blau hat meist einen hohen Sättigungsgrad
+    lower_blue = np.array([100, 150, 50])
+    upper_blue = np.array([140, 255, 255])
+    blue_mask = cv2.inRange(hsv, lower_blue, upper_blue)
+    
+    # Bereich für Schwarz/Dunkelgrau
+    # Schwarz hat eine sehr niedrige Helligkeit (V)
+    lower_black = np.array([0, 0, 0])
+    upper_black = np.array([180, 255, 50])
+    black_mask = cv2.inRange(hsv, lower_black, upper_black)
+    
+    # Kombinierte Maske: Ist ein Haken in Blau ODER Schwarz vorhanden?
+    combined_mask = cv2.bitwise_or(blue_mask, black_mask)
+    
+    # Wenn mehr als 5% der Box "farbig" (Haken) sind, gilt sie als CHECKED
+    active_pixels = np.count_nonzero(combined_mask)
+    total_pixels = combined_mask.size
+    return (active_pixels / total_pixels) > 0.05
 
 def wait_for_ui_change(vm_url, timeout=45, sensitivity_threshold=10.0):
     """
@@ -129,46 +160,137 @@ def wait_for_ui_change(vm_url, timeout=45, sensitivity_threshold=10.0):
 
     print(f"⏱️ Timeout von {timeout}s erreicht. Gehe davon aus, dass die UI fertig ist.")
 
-    # Funktion für Erkennung des Grundriss in HottCad
-def get_floorplan_corners_lightweight(image_path_or_bytes):
-    """
-    Findet die obere linke Ecke des Grundrisses mit purem Pillow & Numpy.
-    Kein OpenCV notwendig!
-    """
-    # 1. Bild laden und in Graustufen umwandeln ('L' = Luma/Grayscale)
-    img = Image.open(image_path_or_bytes).convert('L')
-    
-    # Optional aber wichtig: Da links im HottCAD-Menü auch schwarzer Text ist, 
-    # schneiden wir (crop) das Bild grob auf die rechte Hälfte zu, 
-    # wo NUR der Grundriss ist. (Passe die Werte an deine Auflösung an!)
-    # Format: (left, upper, right, lower)
+def get_checkbox_status(box, img_bytes):
+    img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
     width, height = img.size
-    canvas_area = img.crop((424, 371, 922, 724))
     
-    # 2. In eine Numpy-Matrix (Zahlenwerte der Pixel) umwandeln
-    data = np.array(canvas_area)
+    # Koordinaten-Sicherheit
+    x, y, w, h = [int(v) for v in box] # Sicherstellen, dass es Integers sind
+    x = max(0, min(x, width - 1))
+    y = max(0, min(y, height - 1))
+    w = min(w, width - x)
+    h = min(h, height - y)
     
-    # 3. Threshold: Finde die Koordinaten aller "sehr dunklen" Pixel (Wert unter 50)
-    # np.argwhere gibt eine Liste von [y, x] Koordinaten zurück
-    black_pixels = np.argwhere(data < 50)
-    
-    if len(black_pixels) == 0:
-        return None # Keine schwarzen Linien gefunden
+    if w <= 5 or h <= 5: return False
         
-    # 4. Finde den absolut kleinsten Y-Wert und kleinsten X-Wert (Obere linke Ecke)
-    y_min, x_min = black_pixels.min(axis=0)
-    y_max, x_max = black_pixels.max(axis=0)
+    crop = img.crop((x, y, x + w, y + h))
     
-    # Überprüfen, ob es wirklich ein Haus ist (breiter/höher als 50 Pixel) und kein Rauschen
-    if (x_max - x_min) > 50 and (y_max - y_min) > 50:
-        # WICHTIG: Da wir das Bild am Anfang beschnitten (gecroppt) haben, 
-        # müssen wir den X/Y Offset wieder addieren, um die echten Bildschirm-Koordinaten zu haben!
-        real_x = int(x_min) + 424
-        real_y = int(y_min) + 371
+    # Konvertierung für OpenCV
+    hsv = cv2.cvtColor(np.array(crop), cv2.COLOR_RGB2HSV)
+    
+    # BLAU-DOMINANZ-MASKE (Für Hott-Therm Checkboxen)
+    # Sucht nach dem Blau, das die Checkbox ausfüllt
+    lower_blue = np.array([100, 100, 50]) 
+    upper_blue = np.array([130, 255, 255])
+    mask = cv2.inRange(hsv, lower_blue, upper_blue)
+    
+    # Debug: Speichern im aktuellen Arbeitsverzeichnis
+    debug_path = os.path.join(os.getcwd(), f"debug_box_{x}_{y}.png")
+    cv2.imwrite(debug_path, mask)
+    
+    # Logik: Wenn > 30% der Box blau sind, ist sie aktiv
+    ratio = np.count_nonzero(mask) / mask.size
+    return ratio > 0.30
+
+# Funktion für Erkennung des Grundriss in HottCad
+def get_floorplan_contours_cv(image_bytes):
+    """
+    Analysiert den CAD-Grundriss direkt aus dem RAM-Stream des Screenshots,
+    gibt die Ecken für den OmniParser zurück UND speichert ein Debug-Bild für die Masterarbeit.
+    """
+    # 1. Bild aus dem RAM dekodieren
+    nparr = np.frombuffer(image_bytes.read(), np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    
+    if img is None:
+        return None
+
+    # --- NEU: Kopie des Vollbildes für die Masterarbeit anlegen ---
+    thesis_img = img.copy()
+
+    # 2. Exakter Zuschnitt
+    crop_img = img[325:775, 450:1100]
+    
+    # 3. Vorverarbeitung & Morphologisches Schließen (7x7 Pinsel)
+    gray = cv2.cvtColor(crop_img, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(blurred, 50, 150)
+    
+    kernel = np.ones((7,7), np.uint8)
+    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+
+    # 4. Konturen finden
+    contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+
+    valid_corners = []
+
+    # 5. Ecken mit getunten Parametern filtern
+    for contour in contours:
+        if cv2.contourArea(contour) > 100 or cv2.arcLength(contour, True) > 100:
+            epsilon = 10.0  
+            approx_polygon = cv2.approxPolyDP(contour, epsilon, True)
+            
+            for point in approx_polygon:
+                x, y = point[0]
+                is_duplicate = False
+                
+                # Duplikat-Filter (Radius 40)
+                for (vx, vy) in valid_corners:
+                    if abs(x - vx) < 40 and abs(y - vy) < 40:
+                        is_duplicate = True
+                        break
+                
+                if not is_duplicate:
+                    valid_corners.append((x, y))
+
+    # 6. Koordinaten umrechnen UND auf das Vollbild zeichnen
+    points = {}
+    for i, (x, y) in enumerate(valid_corners):
+        # Reale Koordinaten auf dem Vollbild berechnen
+        real_x = x + 450
+        real_y = y + 325
+        corner_name = f"C{i+1}"
         
-        return {"top_left": (real_x, real_y)}
+        # Für den OmniParser speichern
+        points[corner_name] = (real_x, real_y)
         
-    return None
+        # --- NEU: Markierungen für die Masterarbeit zeichnen ---
+        # Zeichnet einen massiven roten Punkt (Farbe in BGR: Blau=0, Grün=0, Rot=255)
+        cv2.circle(thesis_img, (real_x, real_y), 6, (0, 0, 255), -1)
+        # Schreibt den Namen (z.B. C1) in Blau leicht versetzt daneben
+        cv2.putText(thesis_img, corner_name, (real_x + 10, real_y - 10), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+
+    # --- NEU: Das fertige Bild auf der Festplatte speichern ---
+    # Überschreibt bei jedem Loop diese Datei mit dem aktuellsten Stand
+    cv2.imwrite("cv_thesis_export.png", thesis_img)
+    
+    # Wichtig: Den Stream-Zeiger zurücksetzen, falls der Code danach nochmal das Bild liest
+    image_bytes.seek(0)
+
+    return points
+
+def force_maximize_active_window():
+    """
+    Sendet einen Befehl an den Windows-Agenten, um das aktuell 
+    aktive Fenster (egal welches Programm) zu maximieren.
+    """
+    try:
+        # Port 5055 ist die Schnittstelle zu deiner Windows-VM
+        url = "http://127.0.0.1:5055/execute" 
+        
+        # Dieses PS-Skript greift das aktive Fenster via Win32 API und maximiert es
+        payload = {
+            "mode": "gui",
+            "action": "maximize",
+            "targets": ["HottCAD", "Hott-Therm", "Lüftungskonzept Wohnen"]
+        }
+        
+        requests.post(url, json=payload, timeout=3)
+    except Exception as e:
+        print(f"DEBUG: Globales Maximieren fehlgeschlagen: {e}")
 
 def sampling_loop_sync(
     *,
@@ -240,6 +362,7 @@ def sampling_loop_sync(
     
     if model == "claude-3-5-sonnet-20241022": # Anthropic loop
         while True:
+            force_maximize_active_window()
             parsed_screen = omniparser_client()
             screen_info_block = TextBlock(text='Below is the structured accessibility information of the current UI screen, which includes text and icons you can operate on, take these information into account when you are making the prediction for the next action. Note you will still need to take screenshot to get the image: \n' + parsed_screen['screen_info'], type='text')
             screen_info_dict = {"role": "user", "content": [screen_info_block]}
@@ -267,65 +390,98 @@ def sampling_loop_sync(
         MAX_WAITS = 2
 
         while True:
-            # Frame Skipping Definition
-            try:
-                # 1. Superschneller lokaler Screenshot (Dauert nur wenige Millisekunden)
-                resp = requests.get(f"http://{windows_agent_url}/screenshot", timeout=5)
-                current_raw_img = Image.open(io.BytesIO(resp.content)).convert('RGB')
-                
-                if last_raw_img is not None:
-                    width, height = last_raw_img.size
-                    draw_last = ImageDraw.Draw(last_raw_img)
-                    draw_curr = ImageDraw.Draw(current_raw_img)
-                    
-                    # Taskleiste ausblenden (verhindert falsche Skips durch blinkende Uhr)
-                    draw_last.rectangle([0, height - 40, width, height], fill="black")
-                    draw_curr.rectangle([0, height - 40, width, height], fill="black")
-                    
-                    diff = ImageChops.difference(last_raw_img, current_raw_img)
-                    stat = ImageStat.Stat(diff.convert('L'))
-                    diff_ratio = (stat.mean[0] / 255) * 100
-                    
-                    # Wenn sich fast nichts geändert hat (< 0.1% der Pixel)
-                    if diff_ratio < 0.1: 
-                        skip_counter += 1
-                        if skip_counter <= MAX_SKIPS:
-                            print(f"💨 Fast-Skip ({skip_counter}/{MAX_SKIPS}): Keine UI-Änderung. Warte 1.5s...")
-                            time.sleep(1.5)
-                            continue # Bricht diesen Durchlauf ab und fängt die while-Schleife von vorne an!
-                        else:
-                            print(f"⚠️ Max Skips ({MAX_SKIPS}) erreicht. Erzwinge LLM-Analyse (Klick ging evtl. ins Leere).")
-                            messages.append({
-                                "role": "user",
-                                "content": [
-                                    {
-                                        "type": "text", 
-                                        "text": "WARNUNG: Dein letzter Klick hat absolut nichts auf dem Bildschirm verändert. "
-                                                "Hast du versehentlich auf einen AUSGEGRAUTEN (inaktiven) Button geklickt oder ein leeres Feld getroffen? "
-                                                "Analysiere das Bild genau! Fülle erst fehlende Felder aus, bevor du es erneut versuchst."
-                                    }
-                                ]
-                            })
-                    
-                    # Reset counter, wenn sich das Bild ändert oder wir das Limit erreicht haben
-                    skip_counter = 0
-                        
-                # Aktuelles Bild für den nächsten Loop merken
-                last_raw_img = current_raw_img.copy()
 
-            except Exception as e:
-                print(f"⚠️ Fast-Skip Fehler: {e}. Mache normal weiter.")
+            time.sleep(0.5)
                 
             # A. Screenshot machen und durch OmniParser analysieren lassen
-            parsed_screen = omniparser_client()
+            try:
+                parsed_screen = omniparser_client()
+            except Exception as e:
+                print(f"⚠️ OmniParser temporär nicht erreichbar: {e}. Warte 2s und retry...")
+                time.sleep(2)
+                continue
 
-            start_corner = get_floorplan_corners_lightweight(io.BytesIO(resp.content))
+            screen_text = str(parsed_screen.get("screen_info", "")).lower()
 
-            if start_corner:
-                x, y = start_corner["top_left"]
-                # 3. Wir schummeln den Phantom-Button für das LLM in die Liste!
-                parsed_screen["screen_info"] += f"\n[999] Grundriss Startpunkt Oben Links"
-                parsed_screen["boxes"]["999"] = [x, y, 5, 5]
+            raw_img_bytes = base64.b64decode(parsed_screen['original_screenshot_base64'])
+
+            # Durchlaufe alle erkannten Boxen
+            lines = parsed_screen.get("screen_info", "").split('\n')
+            updated_info = []
+
+            for line in lines:
+                # 1. ID in der Zeile finden
+                found_id = None
+                for box_id in parsed_screen.get("boxes", {}).keys():
+                    if f"ID: {box_id}" in line:
+                        found_id = box_id
+                        break
+                
+                # 2. Nur wenn wir eine ID gefunden UND es eine Checkbox ist, Status abrufen
+                if found_id and "checkbox" in line.lower():
+                    box = parsed_screen["boxes"][found_id]
+                    is_checked = get_checkbox_status(box, raw_img_bytes)
+                    status_text = " (Status: CHECKED)" if is_checked else " (Status: UNCHECKED)"
+                    line = line.replace(f"ID: {found_id}", f"ID: {found_id}{status_text}")
+                
+                updated_info.append(line)
+
+            # Bereinigte screen_info zurückschreiben
+            parsed_screen["screen_info"] = '\n'.join(updated_info)
+
+            is_hottcad_active = "hottcad" in screen_text and "grundriss" in screen_text
+
+            if is_hottcad_active:
+                img_data = base64.b64decode(parsed_screen['original_screenshot_base64'])
+                # Nur dann führen wir die CPU-intensive Bildverarbeitung aus
+                floorplan_pois = get_floorplan_contours_cv(io.BytesIO(img_data))
+            else:
+                floorplan_pois = None
+                print("CV-Modus pausiert: HottCAD nicht im Fokus.")
+
+            if floorplan_pois:
+                # 1. SOM-Bild decodieren, um darauf zu zeichnen
+                try:
+                    som_data = base64.b64decode(parsed_screen["som_image_base64"])
+                    som_img = Image.open(io.BytesIO(som_data))
+                    draw_som = ImageDraw.Draw(som_img)
+                except Exception as e:
+                    print(f"⚠️ Konnte SOM-Bild für CV-Markierungen nicht laden: {e}")
+                    som_img = None
+
+                # 2. Wir vergeben feste Phantom-IDs (ab 901), um nicht mit OmniParser-IDs zu kollidieren
+                base_id = 901
+                for corner_name, (x, y) in floorplan_pois.items():
+                    str_id = str(base_id)
+                    
+                    # Dem LLM den Text/Semantik geben
+                    parsed_screen["screen_info"] += f"\n[{str_id}] Floorplan Corner {corner_name}"
+                    
+                    # Dem Executor die Klick-Koordinaten geben [x, y, breite, höhe]
+                    parsed_screen["boxes"][str_id] = [int(x), int(y), 5, 5]
+                    
+                    # 3. CV-Punkt & ID auf das Bild zeichnen
+                    if som_img:
+                        # Roter Punkt
+                        r = 4 # Radius
+                        draw_som.ellipse((x - r, y - r, x + r, y + r), fill='red', outline='white')
+                        
+                        # ID (z.B. 901) daneben schreiben (wie OmniParser es tun würde)
+                        # Leicht versetzt, damit es den Punkt nicht verdeckt
+                        text_x, text_y = x + 6, y - 10
+                        
+                        # Dunkelroter Hintergrund für den Text (für Lesbarkeit)
+                        # Wir schätzen die Textgröße grob ab (ca. 20x12 Pixel)
+                        draw_som.rectangle([text_x - 2, text_y - 2, text_x + 22, text_y + 12], fill=(139, 0, 0))
+                        draw_som.text((text_x, text_y), str_id, fill="white")
+
+                    base_id += 1
+                
+                # 4. Verändertes Bild wieder encodieren und speichern
+                if som_img:
+                    buffered = io.BytesIO()
+                    som_img.save(buffered, format="PNG")
+                    parsed_screen["som_image_base64"] = base64.b64encode(buffered.getvalue()).decode("utf-8")
             
             # B. KI-Entscheidung einholen
             # actor() ruft deinen VLMOrchestratedAgent auf
@@ -357,18 +513,30 @@ def sampling_loop_sync(
             action_name = vlm_response_json.get("Action")
             reasoning = vlm_response_json.get("Reasoning", "")
             wait_time = vlm_response_json.get("post_action_wait", 0)
+
+            if action_name == "left_click" and "checkbox" in vlm_response_json.get("Reasoning", "").lower():
+                print("🧠 Checkbox-Logik erkannt: Aktiviere stabilen Wächter...")
+                wait_for_ui_change(vm_url=vm_ip_and_port, timeout=10, sensitivity_threshold=2.0)
             
             if action_name == "wait":
-                consecutive_waits += 1
-                if "Lokaler Python-Blocker" in reasoning or wait_time >= 20:
-                    print("⏳ Notbremse blockiert: Echtes Laden wird fortgesetzt (System wartet...)")
-                    # Wir setzen den Zähler zurück oder frieren ihn ein, da dieses Warten gewollt ist!
+                # 1. OCR-Check: Ist gerade eine Installation oder ein Ladevorgang aktiv?
+                is_installing = any(word in screen_text for word in [
+                    "installieren", "installation", "fortschritt", 
+                    "update download", "bitte warten", "kopieren"
+                ])
+                
+                # 2. Notbremse aussetzen, wenn es einen guten Grund zum Warten gibt
+                if "Lokaler Python-Blocker" in reasoning or wait_time >= 20 or is_installing:
+                    print("⏳ Notbremse ausgesetzt: Installation/Ladevorgang erkannt (System darf warten...)")
+                    # Zähler zurücksetzen, da dieses Warten völlig legitim ist!
                     consecutive_waits = 0 
                 else:
-                    # Das ist ein "echtes" Wait vom LLM
-                    consecutive_waits += 1
-                    if consecutive_waits >= 2:
-                        print("🛑 NOTBREMSE: LLM steckt in der Wait-Falle! (2x 'wait' in Folge). Breche Aufgabe ab.")
+                    # 3. Das ist ein "echtes", unbegründetes Wait vom LLM
+                    consecutive_waits += 1 
+                    
+                    # (Limit auf 3 erhöht, da 2 oft etwas zu streng ist, falls die KI nur kurz etwas prüfen will)
+                    if consecutive_waits >= 3: 
+                        print(f"🛑 NOTBREMSE: LLM steckt in der Wait-Falle! ({consecutive_waits}x 'wait' in Folge). Breche Aufgabe ab.")
                         break
             else:
                 consecutive_waits = 0
@@ -389,6 +557,7 @@ def sampling_loop_sync(
             # --- NEU: DYNAMISCHE PAUSE NACH DER AUSFÜHRUNG ---
             # Wir warten hier, BEVOR der nächste Screenshot gemacht wird!
             wait_time = vlm_response_json.get("post_action_wait", 1)
+            should_maximize = vlm_response_json.get("force_maximize", False) or (action_name == "left_click")
             if wait_time > 1:
                 # Nutze die IP deines Flask-Servers auf der VM (z.B. 127.0.0.1:5050 oder die echte IP)
                 vm_ip_and_port = "127.0.0.1:5055" 
@@ -396,6 +565,10 @@ def sampling_loop_sync(
                 # Wenn es ein schwerer Klick war (wait_time == 20), nutzen wir die dynamische Beobachtung
                 if wait_time >= 20:
                     wait_for_ui_change(vm_url=vm_ip_and_port, timeout=wait_time, sensitivity_threshold=5.0)
+                    force_maximize_active_window()
+                elif should_maximize:
+                    time.sleep(2)
+                    force_maximize_active_window()
                 else:
                     # Für kleine 4-Sekunden Pausen (Ordner) reicht ein normaler Sleep
                     print(f"⏳ Kurze System-Pause: Warte {wait_time}s...")
@@ -419,13 +592,7 @@ def sampling_loop_sync(
 
             # D. Erfolgreiche Aktion: Ergebnisse an die Historie hängen
             # Wir hängen die Tool-Ergebnisse (Screenshot nach dem Klick etc.) an
-            messages.append({
-                "role": "user",
-                "content": tool_result_content,
-            })
-
-            # Optional: Kurze Pause, damit das System Zeit zum Rendern hat
-            # time.sleep(1)
-
-            # Die Tool-Ergebnisse (z.B. neue Screenshots) für die KI sichtbar machen
-            messages.append({"content": tool_result_content, "role": "user"})
+            if isinstance(tool_result_content, list):
+                messages.append({"role": "user", "content": tool_result_content})
+            else:
+                messages.append({"role": "user", "content": [tool_result_content]})

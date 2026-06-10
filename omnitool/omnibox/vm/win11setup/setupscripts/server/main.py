@@ -13,15 +13,15 @@ import sys
 import datetime
 
 # Erstellt die Log-Datei im selben Ordner wie diese main.py
-log_path = os.path.join(os.path.dirname(__file__), "agent_hintergrund_log.txt")
-log_file = open(log_path, "a", encoding="utf-8")
+# log_path = os.path.join(os.path.dirname(__file__), "agent_hintergrund_log.txt")
+# log_file = open(log_path, "a", encoding="utf-8")
 
-log_file.write(f"\n\n{'='*40}\n--- AGENT NEUSTART: {datetime.datetime.now()} ---\n{'='*40}\n")
-log_file.flush()
+# log_file.write(f"\n\n{'='*40}\n--- AGENT NEUSTART: {datetime.datetime.now()} ---\n{'='*40}\n")
+# log_file.flush()
 
 # Leite ALLES (Prints und Fehler) in diese Datei um
-sys.stdout = log_file
-sys.stderr = log_file
+# sys.stdout = log_file
+# sys.stderr = log_file
 
 cursor_path = os.path.join(os.path.dirname(__file__), "cursor.png")
 CURSOR_IMG = Image.open(cursor_path)
@@ -105,7 +105,15 @@ def execute(data):
                 
             pyautogui.scroll(50)
             return jsonify({'status': 'success'})
-
+        # maximizing windows
+        elif action == 'maximize':
+            # Simuliert Alt + Space, dann 'x' (Windows Shortcut für Maximieren)
+            # Das funktioniert fast immer, wenn das Programm das aktive Fenster ist.
+            pyautogui.hotkey('alt', 'space')
+            time.sleep(0.2)
+            pyautogui.press('x')
+            return jsonify({'status': 'success'}), 200
+            
         # --- TASTATUR AKTIONEN ---
         elif action in ['type', 'type_text']:
             text = data.get('text', '')
@@ -138,7 +146,8 @@ parser.add_argument("--log_file", help="log file path", type=str,
 parser.add_argument("--port", help="port", type=int, default=5055)
 args = parser.parse_args()
 
-logging.basicConfig(filename=args.log_file,level=logging.DEBUG, filemode='w' )
+# Loggt jetzt direkt in die Konsole mit schönem Zeitstempel
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('werkzeug')
 
 app = Flask(__name__)
@@ -147,7 +156,6 @@ computer_control_lock = threading.Lock()
 
 @app.route('/probe', methods=['GET'])
 def probe_endpoint():
-    print(">>> Probe-Anfrage erhalten! Sende Antwort...")
     return jsonify({"status": "Probe successful", "message": "Service is operational"}), 200
 
 @app.route('/execute', methods=['POST'])
@@ -178,6 +186,6 @@ def capture_screen_with_cursor():
     screenshot.save(img_io, 'PNG')
     img_io.seek(0)
     return send_file(img_io, mimetype='image/png')
-
+    
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=args.port, debug=False)

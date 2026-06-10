@@ -5,7 +5,7 @@ try:
 except ImportError:
     from strenum import StrEnum
 
-from typing import Literal, TypedDict
+from typing import Any, Literal, TypedDict
 
 from PIL import Image
 
@@ -34,8 +34,14 @@ Action = Literal[
     "cursor_position",
     "hover",
     "wait",
-    "scroll_down",
-    "scroll_up"
+    "input_email", 
+    "input_password",
+    "scroll_down_single",
+    "scroll_up_single",
+    "scroll_down_10",
+    "scroll_up_10",
+    "scroll_down_300",
+    "scroll_up_300"
 ]
 
 
@@ -143,7 +149,8 @@ class ComputerTool(BaseAnthropicTool):
                 self.send_to_vm(f"pyautogui.click({x}, {y})") if x else self.send_to_vm("pyautogui.click()")
                 self.send_to_vm(f"pyautogui.typewrite('{text}', interval=0.1)")
                 self.send_to_vm("pyautogui.press('enter')")
-                return ToolResult(output=text)
+                # Hier die Anpassung für eine schönere Nachricht:
+                return ToolResult(output=f"Typed text: {text}")
 
         # 3. MAUS Aktionen (Klicks & Bewegung)
         if action in ("mouse_move", "left_click", "right_click", "double_click", "middle_click", "left_click_drag"):
@@ -190,7 +197,37 @@ class ComputerTool(BaseAnthropicTool):
         elif action == "wait":
             time.sleep(1)
             return ToolResult(output="Waited 1s")
+        
+        if action == "input_email":
+            import os
+            from dotenv import load_dotenv
+            load_dotenv()
             
+            # 1. Fokus erzwingen: Klick VOR dem Clipboard-Einfügen!
+            if x is not None and y is not None:
+                self.send_to_vm(f"pyautogui.click({x}, {y})")
+                time.sleep(0.5) # Wichtig: Windows braucht Zeit, um den Fokus zu übernehmen
+            
+            # 2. Clipboard-Injektion
+            email = os.getenv('APP_USER')
+            # Hier bauen wir den Befehl als einen einzigen String-Aufruf
+            # Wir escapen ' so, dass er im Python-String der VM nicht crasht
+            self.send_to_vm(f"import pyperclip; pyperclip.copy('{email}'); pyautogui.hotkey('ctrl', 'v')")
+            
+            return ToolResult(output="Email clicked and pasted via clipboard.")
+
+        if action == "input_password":
+            import os
+            from dotenv import load_dotenv
+            load_dotenv()
+            # Klick auf Feld, falls Koord. vorhanden
+            if x is not None and y is not None:
+                self.send_to_vm(f"pyautogui.click({x}, {y})")
+                time.sleep(0.5)
+            self.send_to_vm(f"pyautogui.typewrite('{os.getenv('APP_PASSWORD')}')")
+            self.send_to_vm("pyautogui.press('enter')") # Absenden des Logins
+            return ToolResult(output="Password entered and submitted.")
+                
         raise ToolError(f"Invalid action: {action}")
 
     def send_to_vm(self, action: str, mode: str = "shell"):

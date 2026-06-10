@@ -496,7 +496,7 @@ class VLMOrchestratedAgent:
         # 8. VLM Aufruf (GPT, DeepSeek oder Qwen)
         start = time.time()
         if "gpt" in self.model or "o1" in self.model or "o3-mini" in self.model:
-            vlm_response, token_usage = run_oai_interleaved(
+            result = run_oai_interleaved(
                 messages=planner_messages,
                 system=system,
                 model_name=self.model,
@@ -506,7 +506,7 @@ class VLMOrchestratedAgent:
                 temperature=0.2,
             )
         elif "r1" in self.model:
-            vlm_response, token_usage = run_groq_interleaved(
+            result = run_groq_interleaved(
                 messages=planner_messages,
                 system=system,
                 model_name=self.model,
@@ -514,7 +514,7 @@ class VLMOrchestratedAgent:
                 max_tokens=self.max_tokens,
             )
         elif "qwen" in self.model:
-            vlm_response, token_usage = run_oai_interleaved(
+            result = run_oai_interleaved(
                 messages=planner_messages,
                 system=system,
                 model_name=self.model,
@@ -523,6 +523,15 @@ class VLMOrchestratedAgent:
                 provider_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
                 temperature=0,
             )
+        else:
+            raise ValueError(f"Modell {self.model} wird nicht unterstützt.")
+
+        # --- DANN: Ergebnis prüfen (GILT FÜR ALLE MODELLE) ---
+        if result is None:
+            print("❌ Fehler: API-Antwort war None! Vermutlich Verbindungsabbruch.")
+            return None, None
+            
+        vlm_response, token_usage = result
         
         # Display Token Usage
         current_step_cost = self._calculate_and_display_usage(token_usage)
@@ -591,12 +600,14 @@ class VLMOrchestratedAgent:
                     print(f"🛡️ PYTHON-BLOCKER: '{clean_app_name}' bereits gestartet. Warte auf Fenster...")
                     vlm_response_json["Action"] = "wait"
                     vlm_response_json["post_action_wait"] = 20
+                    vlm_response_json["force_maximize"] = True
                 else:
                     print(f"🚀 LLM-BEFEHL: Starte Makro für '{clean_app_name}'")
                     self.launched_programs.add(clean_app_name)
                     vlm_response_json["Action"] = "openapp"
                     # WICHTIG: Hier nur kurz warten, damit die Befehlskette (Tool-Blöcke) Zeit hat durchzugehen
                     vlm_response_json["post_action_wait"] = 2
+                    vlm_response_json["force_maximize"] = True
             # --- ENDE: PYTHON-BLOCKER ---
         
         # --- HIER STARTET DER NEUE BULLET-PROOF BLOCK ---
@@ -893,18 +904,25 @@ class VLMOrchestratedAgent:
             response_content.append(BetaToolUseBlock(
                 id=f'toolu_{uuid.uuid4()}', input={'action': 'key', 'text': 'enter'}, name='computer', type='tool_use'))
         
-        elif next_action.lower() == "trigger_login":
-            print("🔒 Sicherheits-Feature: Iniziere geschützte Credential-Eingabe...")
-            # Wir senden die Befehle direkt an die Tool-Liste für loop.py
-            # oder rufen die Funktion direkt im Agenten auf
-            cred_blocks = self.input_credentials()
-            response_content.extend(cred_blocks)
+        # In vlm_agent_with_orchestrator.py
         
-        elif next_action.lower() == "scroll_down":
-            # Wir verpacken den Befehl für den Transport zur VM
+        elif next_action.lower().startswith("scroll_"):
+            # Wir extrahieren die Intensität aus dem Namen (z.B. "scroll_50" -> 50)
+            parts = next_action.lower().split("_")
+            intensity = 5 # Default
+            
+            if len(parts) > 1 and parts[1].isdigit():
+                intensity = int(parts[1])
+            elif "single" in next_action.lower():
+                intensity = 1 # Fein-Tuning
+            
+            # Richtung bestimmen
+            is_down = "down" in next_action.lower()
+            clicks = -intensity if is_down else intensity
+            
             action_input = {
-                'action': 'scroll_down', 
-                'clicks': vlm_response_json.get('clicks', -300) # Negativ für Down
+                'action': 'scroll_down' if "down" in next_action else 'scroll_up',
+                'clicks': clicks # Hier berechnest du basierend auf "single", "50" etc.
             }
             if 'box_centroid_coordinate' in vlm_response_json:
                 action_input['coordinate'] = vlm_response_json['box_centroid_coordinate']
@@ -915,12 +933,14 @@ class VLMOrchestratedAgent:
                 name='computer', 
                 type='tool_use'
             ))
-
-        elif next_action.lower() == "scroll_up":
-            action_input = {'action': 'scroll_up', 'clicks': vlm_response_json.get('clicks', 300)}
+        
+        elif next_action.lower() in ["input_email", "input_password"]:
+            tool_input = {"action": next_action.lower()}
+            
             if 'box_centroid_coordinate' in vlm_response_json:
-                action_input['coordinate'] = vlm_response_json['box_centroid_coordinate']
-            response_content.append(BetaToolUseBlock(id=f'toolu_{uuid.uuid4()}', input=action_input, name='computer', type='tool_use'))
+                tool_input['coordinate'] = vlm_response_json['box_centroid_coordinate']
+            response_content.append(BetaToolUseBlock(
+                id=f'toolu_{uuid.uuid4()}', input=tool_input, name='computer', type='tool_use'))
                 
         else:
             # FIX: Hänge die Koordinaten zwingend an den tatsächlichen Klick-Befehl an!
@@ -1165,9 +1185,10 @@ class VLMOrchestratedAgent:
         input_message = copy.deepcopy(messages)
         input_message.append({"role": "user", "content": update_ledger_prompt})
         
-        vlm_response, token_usage = run_oai_interleaved(
+        # Das Ergebnis hier in einer Variablen zwischenspeichern
+        result = run_oai_interleaved(
             messages=input_message,
-            system="",  # Ledger braucht meist kein separates System-Prompt
+            system="",
             model_name=self.model,
             api_key=self.api_key,
             max_tokens=self.max_tokens,
@@ -1175,7 +1196,16 @@ class VLMOrchestratedAgent:
             temperature=0,
         )
 
-        # 5. Das Ergebnis extrahieren (als JSON-String zurückgeben)
+        # 5. Absicherung gegen None-Rückgabe
+        if result is None:
+            print("❌ Fehler: run_oai_interleaved lieferte None zurück. Rückgabe von Fallback-JSON.")
+            # Rückgabe eines gültigen JSON-Strings, der garantiert kein "answer: true" enthält
+            return '{"is_request_satisfied": {"answer": false, "reason": "API Error"}}'
+        
+        # Erst wenn wir sicher sind, dass es kein None ist, entpacken
+        vlm_response, token_usage = result
+        
+        # 6. Das Ergebnis extrahieren
         updated_ledger = extract_data(vlm_response, "json")
         
         return updated_ledger
