@@ -5,7 +5,7 @@ ARG VERSION_ARG="latest"
 # --- AMD64 STAGE ---
 FROM scratch AS build-amd64
 # Nutze das stabile qemux Image
-COPY --from=qemux/qemu:latest / /
+COPY --from=qemux/qemu:7.30 / /
 
 ARG DEBCONF_NOWARNINGS="yes"
 ARG DEBIAN_FRONTEND="noninteractive"
@@ -57,6 +57,11 @@ RUN chmod +x /run/network.sh && \
     chmod +x /run/define.sh && \
     dos2unix /run/network.sh && \
     dos2unix /run/define.sh
+
+# --- NEU: Den fehlenden 'strip' Befehl global als Skript wiederherstellen ---
+RUN echo '#!/bin/bash' > /usr/local/bin/strip && \
+    echo 'echo "$1" | xargs' >> /usr/local/bin/strip && \
+    chmod +x /usr/local/bin/strip
 
 # Manuelle Installation von WSDD (da kein Apt-Paket vorhanden)
 ADD --chmod=755 https://raw.githubusercontent.com/christgau/wsdd/v0.8/src/wsdd.py /usr/sbin/wsdd
