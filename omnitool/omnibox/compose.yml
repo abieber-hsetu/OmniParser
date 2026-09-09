@@ -1,5 +1,8 @@
 services:
   windows:
+    build:
+        context: .
+        dockerfile: Dockerfile
     image: windows-local
     env_file:
       - ../../../.env
@@ -7,9 +10,9 @@ services:
     privileged: true
     environment:
       VERSION: "11"
-      RAM_SIZE: "16G"
+      RAM_SIZE: "4G"
       CPU_CORES: "6"
-      DISK_SIZE: "75G" # vor dem Erhöhen schauen ob noch genug Speicher frei ist
+      DISK_SIZE: "50G" # vor dem Erhöhen schauen ob noch genug Speicher frei ist
       KVM: "Y"
       CPU_MODEL: "host"
       # NET_TYPE: "none"
@@ -29,7 +32,7 @@ services:
       - NET_ADMIN
     ports:
       - "8006:8007"
-      - "5900:5900"
+      - "5901:5900"
       - "5055:5055"
     volumes:
       - "./vm/win11iso/custom.iso:/custom.iso"
@@ -38,4 +41,3 @@ services:
       - "./vm/win11storage:/storage"
       - "./vm/win11setup/setupscripts:/run/import"
       - "./smb.conf:/etc/samba/smb.conf"
-      - "./testmuster:/storage/test_files"

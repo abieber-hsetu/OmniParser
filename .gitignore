@@ -1,14 +1,9 @@
-weights/icon_caption_blip2
-weights/icon_caption_florence
-weights/icon_detect/
-weights/icon_detect_v1_5/
-weights/icon_detect_v1_5_2/
+weights/*
 .gradio
 __pycache__/
 debug.ipynb
 util/__pycache__/
 index.html?linkid=2289031
 wget-log
-weights/icon_caption_florence_v2/
 omnitool/gradio/uploads/Miniconda3-latest-Linux-x86_64.sh
 Miniconda3-latest-Linux-x86_64.sh
