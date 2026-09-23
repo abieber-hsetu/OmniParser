@@ -102,12 +102,12 @@ finish() {
   fi
 
   pid="/var/run/tpm.pid"
-  [ -s "$pid" ] && pKill "$(<"$pid")"
+  [ -s "$pid" ] && kill -15 "$(<"$pid")" 2>/dev/null || true
 
   pid="/var/run/wsdd.pid"
-  [ -s "$pid" ] && pKill "$(<"$pid")"
+  [ -s "$pid" ] && kill -15 "$(<"$pid")" 2>/dev/null || true
 
-  fKill "smbd"
+  pkill -15 "smbd" 2>/dev/null || true
 
   closeNetwork
 
